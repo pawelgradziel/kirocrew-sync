@@ -1,48 +1,38 @@
 #!/usr/bin/env bash
 #
-# KiroCrew Sync - Cross-platform sync utility with modular storage backends
+# KiroCrew Sync - three-way sync with modular storage backends
 # Supports: Linux, macOS
 # Storage backends: Google Drive, S3, rclone, rsync
+#
+# Sync works on an unpacked, canonical form of KiroCrew's state rather than on
+# the raw files. Databases become one JSONL file per table; git tracks that
+# form, finds the merge base, and drives row-level merge drivers. See
+# docs/adr/0002-three-way-sync-via-unpacked-git-repo.md
 #
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="$SCRIPT_DIR/config.sh"
+CONFIG_FILE="${KIROCREW_SYNC_CONFIG:-$SCRIPT_DIR/config.sh}"
 
-# Settings come from the environment or from config.sh, and the environment
-# wins so a single run can be redirected: SYNC_BACKEND=s3 ./kirocrew-sync.sh
-# push. config.sh is sourced below and would overwrite these, so remember what
-# the environment actually set before that happens.
+# Captured before config.sh is sourced so an explicit environment variable
+# still overrides the config file rather than the other way around.
 ENV_SYNC_BACKEND="${SYNC_BACKEND:-}"
 ENV_KIROCREW_DIR="${KIROCREW_DIR:-}"
 ENV_SYNC_PORTABLE_PATHS="${SYNC_PORTABLE_PATHS:-}"
 ENV_KIROCREW_PATH_MAP="${KIROCREW_PATH_MAP:-}"
 
-# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-log_info() {
-    echo -e "${BLUE}ℹ${NC} $*"
-}
+log_info()    { echo -e "${BLUE}ℹ${NC} $*"; }
+log_success() { echo -e "${GREEN}✓${NC} $*"; }
+log_warn()    { echo -e "${YELLOW}⚠${NC} $*"; }
+log_error()   { echo -e "${RED}✗${NC} $*"; }
 
-log_success() {
-    echo -e "${GREEN}✓${NC} $*"
-}
-
-log_warn() {
-    echo -e "${YELLOW}⚠${NC} $*"
-}
-
-log_error() {
-    echo -e "${RED}✗${NC} $*"
-}
-
-# Load configuration
 if [ -f "$CONFIG_FILE" ]; then
     # shellcheck source=/dev/null
     source "$CONFIG_FILE"
@@ -52,12 +42,9 @@ else
     exit 1
 fi
 
-# Resolve settings: environment first, config.sh second, built-in default last.
 BACKEND="${ENV_SYNC_BACKEND:-${SYNC_BACKEND:-gdrive}}"
 KIROCREW_DIR="${ENV_KIROCREW_DIR:-${KIROCREW_DIR:-$HOME/.kiro/crew}}"
-export KIROCREW_DIR
 
-# Load storage backend
 BACKEND_FILE="$SCRIPT_DIR/backends/${BACKEND}.sh"
 if [ ! -f "$BACKEND_FILE" ]; then
     log_error "Backend '$BACKEND' not found at $BACKEND_FILE"
@@ -69,32 +56,55 @@ source "$BACKEND_FILE"
 # Path portability: knowledge-base paths are rewritten to a machine-independent
 # form on the way out and back to this machine's paths on the way in, so folder
 # sources keep working after a sync. Set SYNC_PORTABLE_PATHS=0 to sync URIs
-# verbatim instead.
+# verbatim instead. See docs/adr/0001-knowledge-path-portability.md
 PORTABLE_PATHS_TOOL="$SCRIPT_DIR/lib/portable_paths.py"
 SYNC_PORTABLE_PATHS="${ENV_SYNC_PORTABLE_PATHS:-${SYNC_PORTABLE_PATHS:-1}}"
 KIROCREW_PATH_MAP="${ENV_KIROCREW_PATH_MAP:-${KIROCREW_PATH_MAP:-$KIROCREW_DIR/path_map.conf}}"
-export KIROCREW_PATH_MAP
+export KIROCREW_PATH_MAP SYNC_PORTABLE_PATHS
 
-# Data sources to sync
-declare -A DATA_SOURCES=(
-    ["sessions"]="sessions"
-    ["memory.db"]="memory.db"
-    ["memory.db-wal"]="memory.db-wal"
-    ["memory.db-shm"]="memory.db-shm"
-    ["memory_index.db"]="memory_index.db"
-    ["session_map.json"]="session_map.json"
-    ["artifacts"]="data/artifacts.db"
-    ["knowledge"]="workspace/knowledge"
-    ["workspace_memory"]="workspace/memory"
-    ["config.json"]="config.json"
-    ["tags.json"]="tags.json"
-    ["lessons.db"]="data/lessons.db"
-)
+SYNC_ROOT="$KIROCREW_DIR/.sync"
+SYNC_REPO="$SYNC_ROOT/repo"
+CONFLICT_LOG="$SYNC_ROOT/conflicts.jsonl"
+SYNC_BRANCH="main"
 
-# Refuse to sync while KiroCrew is running, so a half-written database never
-# travels. The pattern matches this script too -- its own name contains
-# "kirocrew" -- so self-matches are filtered out before deciding.
+STRATEGY="auto"
+DRY_RUN=false
+FORCE=false
+
+PYTHON_BIN="${KIROCREW_SYNC_PYTHON:-python3}"
+
+kcsync() {
+    PYTHONPATH="$SCRIPT_DIR/lib" "$PYTHON_BIN" -m kcsync "$@"
+}
+
+require_python() {
+    if ! command -v "$PYTHON_BIN" &> /dev/null; then
+        log_error "$PYTHON_BIN is not installed"
+        log_info "The sync engine needs Python 3.8+ with the stdlib sqlite3 module."
+        exit 1
+    fi
+    if ! "$PYTHON_BIN" -c 'import sqlite3, sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' 2>/dev/null; then
+        log_error "$PYTHON_BIN lacks sqlite3 or is older than 3.8"
+        exit 1
+    fi
+}
+
+require_git() {
+    if ! command -v git &> /dev/null; then
+        log_error "git is not installed"
+        log_info "git provides the merge base and conflict handling for sync."
+        exit 1
+    fi
+}
+
+# Refuse to write merged data while KiroCrew is running. Reading is safe, so
+# only the pack step is gated. The pattern matches this script too -- its own
+# name contains "kirocrew" -- so self-matches are filtered out before deciding.
 check_kirocrew_running() {
+    if [ "${KIROCREW_SYNC_SKIP_RUNNING_CHECK:-0}" = "1" ]; then
+        return 0
+    fi
+
     local self
     self="$(basename "${BASH_SOURCE[0]}")"
     local pid args
@@ -106,9 +116,9 @@ check_kirocrew_running() {
         case "$args" in
             "" | *"$self"*) continue ;;
         esac
-        log_error "KiroCrew is currently running. Please stop it before syncing."
+        log_error "KiroCrew is running. Stop it before writing merged data back."
         log_info "Running as: $args"
-        log_info "Run: pkill -f kirocrew"
+        log_info "Reading is safe; writing is not. Quit KiroCrew and re-run."
         return 1
     done < <(pgrep -f "kirocrew" 2>/dev/null || true)
 
@@ -116,276 +126,412 @@ check_kirocrew_running() {
 }
 
 get_machine_id() {
+    local id
     if [ -f "$KIROCREW_DIR/.machine_id" ]; then
-        cat "$KIROCREW_DIR/.machine_id"
+        id="$(cat "$KIROCREW_DIR/.machine_id")"
     else
-        local machine_id
-        machine_id="$(hostname)-$(date +%s)"
-        echo "$machine_id" > "$KIROCREW_DIR/.machine_id"
-        echo "$machine_id"
+        mkdir -p "$KIROCREW_DIR"
+        id="$(hostname)-$(date +%s)"
+        echo "$id" > "$KIROCREW_DIR/.machine_id"
     fi
+    # Used as a filename and a git ref component.
+    echo "$id" | tr -c 'A-Za-z0-9._-' '-' | sed 's/-\{2,\}/-/g; s/^-//; s/-$//'
 }
 
-knowledge_db_path() {
-    # knowledge.db under a bundle directory or under KIROCREW_DIR
-    echo "$1/${DATA_SOURCES[knowledge]}/knowledge.db"
+git_repo() {
+    git -C "$SYNC_REPO" "$@"
 }
 
-# Rewrite the knowledge paths in a BUNDLE copy of the database. The live
-# database is never touched: KiroCrew resolves source URIs with a bare
-# Path(uri) and does not expand "~", so it needs real absolute paths locally.
-# Portable paths exist only while the data is in transit.
-translate_bundle_paths() {
-    local bundle_dir="$1"
-    local direction="$2"
-    local db
-    db="$(knowledge_db_path "$bundle_dir")"
+ensure_repo() {
+    require_git
+    mkdir -p "$SYNC_ROOT"
 
-    [ "$SYNC_PORTABLE_PATHS" = "1" ] || return 0
-    [ -f "$db" ] || return 0
-
-    if ! command -v python3 &> /dev/null; then
-        log_warn "python3 not found - knowledge paths sent as-is (folder sources may break on other machines)"
-        return 0
+    if [ ! -d "$SYNC_REPO/.git" ]; then
+        mkdir -p "$SYNC_REPO"
+        git init -q -b "$SYNC_BRANCH" "$SYNC_REPO"
+        log_success "Created sync repo at $SYNC_REPO"
     fi
 
-    if [ "$direction" = "encode" ]; then
-        log_info "Making knowledge paths portable..."
-    else
-        log_info "Resolving knowledge paths for this machine..."
-    fi
-
-    if python3 "$PORTABLE_PATHS_TOOL" "$direction" "$db"; then
-        log_success "Knowledge paths translated"
-    else
-        log_warn "Path translation failed - continuing with paths as stored"
-    fi
-}
-
-# A SQLite database and its write-ahead log are a matched pair. A bundle that
-# carries a checkpointed .db with no -wal beside it must not inherit this
-# machine's older -wal, which SQLite would replay onto the incoming file.
-drop_stale_wal() {
-    local bundle_path="$1"
-    local dest_path="$2"
-
-    if [ -d "$bundle_path" ]; then
-        local db
-        while IFS= read -r db; do
-            drop_stale_wal "$db" "$dest_path/${db#"$bundle_path"/}"
-        done < <(find "$bundle_path" -type f -name '*.db')
-        return 0
-    fi
-
-    case "$bundle_path" in
-        *.db) ;;
-        *) return 0 ;;
-    esac
-
-    local suffix
-    for suffix in -wal -shm; do
-        if [ ! -e "${bundle_path}${suffix}" ] && [ -e "${dest_path}${suffix}" ]; then
-            rm -f "${dest_path}${suffix}"
-            log_info "Removed stale $(basename "${dest_path}${suffix}")"
-        fi
-    done
-}
-
-create_manifest() {
-    local manifest_file="$1"
     local machine_id
-    machine_id=$(get_machine_id)
-    
-    cat > "$manifest_file" << EOF
-{
-  "machine_id": "$machine_id",
-  "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-  "platform": "$(uname -s)",
-  "files": {
-EOF
+    machine_id="$(get_machine_id)"
+    git_repo config user.name  "kirocrew-sync"
+    git_repo config user.email "kirocrew-sync@${machine_id}"
+    # Sync commits are machine state, not authored work; never sign or hook them.
+    git_repo config commit.gpgsign false
+    git_repo config core.hooksPath /dev/null
 
-    local first=true
-    for key in "${!DATA_SOURCES[@]}"; do
-        local src="${DATA_SOURCES[$key]}"
-        local full_path="$KIROCREW_DIR/$src"
-        
-        if [ -e "$full_path" ]; then
-            [ "$first" = false ] && echo "," >> "$manifest_file"
-            first=false
-            
-            local hash
-            if [ -d "$full_path" ]; then
-                hash=$(find "$full_path" -type f -exec md5sum {} \; 2>/dev/null | sort | md5sum | cut -d' ' -f1 || echo "dir")
-            else
-                hash=$(md5sum "$full_path" 2>/dev/null | cut -d' ' -f1 || echo "missing")
-            fi
-            
-            printf '    "%s": {"path": "%s", "hash": "%s"}' "$key" "$src" "$hash" >> "$manifest_file"
-        fi
-    done
-    
-    cat >> "$manifest_file" << EOF
+    local driver="PYTHONPATH=$SCRIPT_DIR/lib $PYTHON_BIN -m kcsync merge-driver"
+    git_repo config merge.kcsync-rows.name "KiroCrew row-level three-way merge"
+    git_repo config merge.kcsync-rows.driver "$driver rows %O %A %B %P"
+    git_repo config merge.kcsync-json.name "KiroCrew structural JSON merge"
+    git_repo config merge.kcsync-json.driver "$driver json %O %A %B %P"
+    # Built-in "keep ours" for regenerated files.
+    git_repo config merge.ours.name "keep ours"
+    git_repo config merge.ours.driver "true"
 
-  }
-}
+    cat > "$SYNC_REPO/.gitattributes" << 'EOF'
+# Row-level three-way merge, keyed on each table's primary key.
+db/**/*.jsonl           merge=kcsync-rows
+# A schema difference means the machines are on different KiroCrew versions.
+# Treating it as binary forces a hard conflict instead of a silent text merge.
+db/*/_schema.sql        merge=binary
+# Regenerated from the schema on every unpack.
+db/*/_policy.json       merge=ours
+# Structural merge, key by key.
+files/**/*.json         merge=kcsync-json
+# Session transcripts are append-only.
+files/sessions/*.jsonl  merge=union
+# Content-addressed: identical path implies identical bytes.
+blob/**                 binary
+* text=auto eol=lf
 EOF
 }
 
-prepare_sync_bundle() {
-    local bundle_dir="$1"
-    
-    log_info "Preparing sync bundle..."
-    
-    mkdir -p "$bundle_dir"
-    
-    # Copy each data source
-    for key in "${!DATA_SOURCES[@]}"; do
-        local src="${DATA_SOURCES[$key]}"
-        local full_path="$KIROCREW_DIR/$src"
-        
-        if [ -e "$full_path" ]; then
-            local dest="$bundle_dir/$src"
-            mkdir -p "$(dirname "$dest")"
-            
-            if [ -d "$full_path" ]; then
-                rsync -a --exclude="*.lock" --exclude="*.tmp" "$full_path/" "$dest/"
-            else
-                cp "$full_path" "$dest"
-            fi
-            log_success "Packaged: $src"
-        else
-            log_warn "Skipped (not found): $src"
-        fi
-    done
-    
-    # Create manifest
-    create_manifest "$bundle_dir/manifest.json"
-    log_success "Created manifest"
+repo_has_commit() {
+    git_repo rev-parse --verify -q "$SYNC_BRANCH" > /dev/null 2>&1
 }
 
-apply_sync_bundle() {
-    local bundle_dir="$1"
-    
-    if [ ! -f "$bundle_dir/manifest.json" ]; then
-        log_error "Invalid sync bundle: manifest.json missing"
-        return 1
+commit_local_state() {
+    local message="$1"
+    git_repo add -A
+    if git_repo diff --cached --quiet 2>/dev/null && repo_has_commit; then
+        return 1   # nothing changed
     fi
-    
-    log_info "Applying sync bundle..."
-    
-    # Show remote machine info
-    local remote_machine
-    remote_machine=$(grep -o '"machine_id": "[^"]*"' "$bundle_dir/manifest.json" | cut -d'"' -f4)
-    local remote_time
-    remote_time=$(grep -o '"timestamp": "[^"]*"' "$bundle_dir/manifest.json" | cut -d'"' -f4)
-    
-    log_info "Remote: $remote_machine at $remote_time"
-    
-    # Apply each data source
-    for key in "${!DATA_SOURCES[@]}"; do
-        local src="${DATA_SOURCES[$key]}"
-        local source_path="$bundle_dir/$src"
-        local dest_path="$KIROCREW_DIR/$src"
-        
-        if [ -e "$source_path" ]; then
-            mkdir -p "$(dirname "$dest_path")"
-            drop_stale_wal "$source_path" "$dest_path"
+    git_repo commit -q -m "$message"
+    return 0
+}
 
-            if [ -d "$source_path" ]; then
-                rsync -a --exclude="*.lock" --exclude="*.tmp" "$source_path/" "$dest_path/"
-            else
-                cp "$source_path" "$dest_path"
-            fi
-            log_success "Applied: $src"
+bundle_name() {
+    echo "$(get_machine_id).bundle"
+}
+
+# Fetch every machine's bundle into refs/remotes/<machine>/<branch>.
+fetch_bundles() {
+    local dir="$1"
+    local own
+    own="$(bundle_name)"
+    local found=0
+
+    shopt -s nullglob
+    for bundle in "$dir"/bundles/*.bundle; do
+        local base
+        base="$(basename "$bundle" .bundle)"
+        [ "$(basename "$bundle")" = "$own" ] && continue
+        # This function's stdout is captured, so diagnostics go to stderr.
+        if ! git_repo bundle verify "$bundle" > /dev/null 2>&1; then
+            log_warn "Skipping unreadable bundle: $(basename "$bundle")" >&2
+            continue
+        fi
+        if git_repo fetch -q "$bundle" \
+            "refs/heads/$SYNC_BRANCH:refs/remotes/$base/$SYNC_BRANCH" 2>/dev/null; then
+            found=$((found + 1))
+        else
+            log_warn "Could not fetch from $(basename "$bundle")" >&2
         fi
     done
-    
-    log_success "Sync bundle applied"
+    shopt -u nullglob
+    echo "$found"
+}
+
+# Schema version and embedding space must be compared before merging: the
+# merge collapses each row to one winner, after which the difference is gone.
+check_remote_compat() {
+    local ref="$1" machine="$2"
+    local tmp
+    tmp="$(mktemp -d)"
+    if ! git_repo archive "$ref" db 2>/dev/null | tar -x -C "$tmp" 2>/dev/null; then
+        rm -rf "$tmp"
+        return 0
+    fi
+    local rc=0
+    kcsync compat --kirocrew-dir "$KIROCREW_DIR" --remote "$tmp" \
+        --label "$machine" || rc=$?
+    rm -rf "$tmp"
+    return $rc
+}
+
+merge_remote_refs() {
+    local conflicted=0
+    local merged=0
+    local incompatible=0
+
+    local refs
+    refs="$(git_repo for-each-ref --format='%(refname)' "refs/remotes" 2>/dev/null || true)"
+    [ -z "$refs" ] && { echo "0 0 0"; return 0; }
+
+    while IFS= read -r ref; do
+        [ -z "$ref" ] && continue
+        local machine
+        machine="$(echo "$ref" | cut -d/ -f3)"
+
+        if git_repo merge-base --is-ancestor "$ref" "$SYNC_BRANCH" 2>/dev/null; then
+            continue   # already have everything from this machine
+        fi
+
+        if ! $FORCE && ! check_remote_compat "$ref" "$machine"; then
+            incompatible=$((incompatible + 1))
+            continue
+        fi
+
+        local extra=()
+        if ! git_repo merge-base "$SYNC_BRANCH" "$ref" > /dev/null 2>&1; then
+            # First sync between these machines: no shared history, so the
+            # merge base is empty and every row is an add on both sides.
+            extra+=(--allow-unrelated-histories)
+        fi
+
+        # This function's stdout is captured, so diagnostics go to stderr.
+        log_info "Merging changes from $machine..." >&2
+        if KCSYNC_STRATEGY="$STRATEGY" \
+           KCSYNC_REPO="$SYNC_REPO" \
+           KCSYNC_CONFLICT_LOG="$CONFLICT_LOG" \
+           git_repo merge -q --no-edit "${extra[@]}" \
+                -m "sync: merge $machine" "$ref" 2>/dev/null; then
+            merged=$((merged + 1))
+        else
+            if [ -n "$(git_repo ls-files -u)" ]; then
+                conflicted=$((conflicted + 1))
+                break
+            fi
+            log_warn "Merge from $machine did not complete" >&2
+        fi
+    done <<< "$refs"
+
+    echo "$merged $conflicted $incompatible"
+}
+
+report_conflicts() {
+    [ -s "$CONFLICT_LOG" ] || return 0
+    local total
+    total="$(wc -l < "$CONFLICT_LOG" | tr -d ' ')"
+    log_warn "$total row conflict(s) resolved automatically:"
+    "$PYTHON_BIN" - "$CONFLICT_LOG" << 'EOF'
+import collections, json, sys
+counts = collections.Counter()
+examples = {}
+with open(sys.argv[1], encoding="utf-8") as fh:
+    for line in fh:
+        line = line.strip()
+        if not line:
+            continue
+        entry = json.loads(line)
+        key = (entry.get("table"), entry.get("kind"), entry.get("resolution"))
+        counts[key] += 1
+        examples.setdefault(key, entry.get("key", ""))
+for (table, kind, resolution), count in counts.most_common(10):
+    sample = str(examples[(table, kind, resolution)])[:60]
+    print("    %-24s %-14s %-12s x%d  e.g. %s"
+          % (table, kind, resolution, count, sample))
+EOF
+    log_info "Full log: $CONFLICT_LOG"
+}
+
+show_unresolved() {
+    log_error "Unresolved conflicts. Sync stopped before touching your data."
+    git_repo diff --name-only --diff-filter=U | sed 's/^/    /'
+    log_info ""
+    log_info "Resolve inside $SYNC_REPO, then:"
+    log_info "  git -C '$SYNC_REPO' add -A && git -C '$SYNC_REPO' commit"
+    log_info "  $0 resume"
+    log_info ""
+    log_info "Or re-run with an automatic strategy:"
+    log_info "  git -C '$SYNC_REPO' merge --abort"
+    log_info "  $0 sync --strategy local-wins    # or remote-wins"
+}
+
+apply_to_kirocrew() {
+    local pack_args=(--kirocrew-dir "$KIROCREW_DIR" --repo "$SYNC_REPO")
+    $DRY_RUN && pack_args+=(--dry-run)
+    $FORCE   && pack_args+=(--force)
+
+    if ! $DRY_RUN; then
+        check_kirocrew_running || exit 1
+    fi
+
+    log_info "Applying merged state to KiroCrew..."
+    if ! kcsync pack "${pack_args[@]}"; then
+        log_error "Pack failed; KiroCrew data was left unchanged (or restored)."
+        exit 1
+    fi
+}
+
+publish_bundle() {
+    local temp_dir="$1"
+    mkdir -p "$temp_dir/bundles"
+    git_repo bundle create "$temp_dir/bundles/$(bundle_name)" "$SYNC_BRANCH" \
+        > /dev/null 2>&1
+    log_info "Publishing to $BACKEND..."
+    backend_push "$temp_dir"
+}
+
+# --------------------------------------------------------------------------
+
+cmd_sync() {
+    require_python
+    ensure_repo
+    : > "$CONFLICT_LOG"
+
+    if [ -n "$(git_repo ls-files -u 2>/dev/null)" ]; then
+        log_error "A previous sync left unresolved conflicts."
+        log_info "Resolve them and run '$0 resume', or 'git -C \"$SYNC_REPO\" merge --abort'."
+        exit 1
+    fi
+
+    log_info "Unpacking local state..."
+    kcsync unpack --kirocrew-dir "$KIROCREW_DIR" --repo "$SYNC_REPO"
+    if commit_local_state "sync: local state from $(get_machine_id)"; then
+        log_success "Recorded local changes"
+    else
+        log_info "No local changes since last sync"
+    fi
+
+    local temp_dir
+    temp_dir=$(mktemp -d)
+    trap 'rm -rf "$temp_dir"' EXIT
+
+    log_info "Fetching from $BACKEND..."
+    if ! backend_pull "$temp_dir" 2>/dev/null; then
+        log_warn "Nothing to pull (first sync, or remote not reachable)"
+    fi
+
+    local fetched
+    fetched="$(fetch_bundles "$temp_dir")"
+    if [ "$fetched" -gt 0 ]; then
+        log_success "Fetched $fetched remote machine(s)"
+        local result merged conflicted incompatible
+        result="$(merge_remote_refs)"
+        merged="$(echo "$result" | awk '{print $1}')"
+        conflicted="$(echo "$result" | awk '{print $2}')"
+        incompatible="$(echo "$result" | awk '{print $3}')"
+
+        if [ "$conflicted" -gt 0 ]; then
+            report_conflicts
+            show_unresolved
+            exit 1
+        fi
+        if [ "${incompatible:-0}" -gt 0 ]; then
+            log_error "Skipped $incompatible incompatible machine(s); see above."
+            log_info "Bring both machines to the same KiroCrew version and"
+            log_info "embedding model, or override with --force."
+            exit 1
+        fi
+        [ "$merged" -gt 0 ] && log_success "Merged $merged remote machine(s)"
+    else
+        log_info "No remote machines found"
+    fi
+
+    report_conflicts
+    apply_to_kirocrew
+
+    if $DRY_RUN; then
+        log_success "Dry run complete. Nothing was written or published."
+        return 0
+    fi
+
+    publish_bundle "$temp_dir"
+    log_success "Sync complete"
+}
+
+cmd_resume() {
+    require_python
+    ensure_repo
+
+    if [ -n "$(git_repo ls-files -u 2>/dev/null)" ]; then
+        log_error "There are still unmerged paths in $SYNC_REPO"
+        git_repo diff --name-only --diff-filter=U | sed 's/^/    /'
+        exit 1
+    fi
+    if [ -f "$SYNC_REPO/.git/MERGE_HEAD" ]; then
+        git_repo commit -q --no-edit
+        log_success "Completed the pending merge"
+    fi
+
+    apply_to_kirocrew
+    $DRY_RUN && { log_success "Dry run complete."; return 0; }
+
+    local temp_dir
+    temp_dir=$(mktemp -d)
+    trap 'rm -rf "$temp_dir"' EXIT
+    backend_pull "$temp_dir" 2>/dev/null || true
+    publish_bundle "$temp_dir"
+    log_success "Sync complete"
 }
 
 cmd_push() {
-    log_info "Starting push to $BACKEND..."
-    
-    check_kirocrew_running || exit 1
-    
+    require_python
+    ensure_repo
+    log_info "Unpacking local state..."
+    kcsync unpack --kirocrew-dir "$KIROCREW_DIR" --repo "$SYNC_REPO"
+    commit_local_state "push: local state from $(get_machine_id)" || \
+        log_info "No local changes since last sync"
+
+    if $DRY_RUN; then
+        log_success "Dry run complete. Nothing was published."
+        return 0
+    fi
+
     local temp_dir
     temp_dir=$(mktemp -d)
     trap 'rm -rf "$temp_dir"' EXIT
-    
-    prepare_sync_bundle "$temp_dir"
-    translate_bundle_paths "$temp_dir" encode
-
-    # Call backend-specific push
-    backend_push "$temp_dir"
-    
+    # Backends mirror with delete, so other machines' bundles must be carried
+    # forward rather than dropped.
+    backend_pull "$temp_dir" 2>/dev/null || true
+    publish_bundle "$temp_dir"
     log_success "Push completed"
+    log_info "This published local state without merging. Use 'sync' for two-way."
 }
 
 cmd_pull() {
-    log_info "Starting pull from $BACKEND..."
-    
-    check_kirocrew_running || exit 1
-    
-    local temp_dir
-    temp_dir=$(mktemp -d)
-    trap 'rm -rf "$temp_dir"' EXIT
-    
-    # Call backend-specific pull
-    backend_pull "$temp_dir"
-    
-    if [ -f "$temp_dir/manifest.json" ]; then
-        translate_bundle_paths "$temp_dir" decode
-        apply_sync_bundle "$temp_dir"
-        log_success "Pull completed"
-    else
-        log_error "Pull failed: no data received"
-        exit 1
-    fi
+    STRATEGY="remote-wins"
+    log_info "Pull applies remote changes, preferring remote on conflict."
+    cmd_sync
 }
 
 cmd_status() {
-    log_info "Checking sync status..."
-    
-    local machine_id
-    machine_id=$(get_machine_id)
-    log_info "Machine ID: $machine_id"
-    log_info "Backend: $BACKEND"
-    
-    # Call backend-specific status
-    backend_status
-    
-    # Show local data status
-    log_info "\nLocal data status:"
-    for key in "${!DATA_SOURCES[@]}"; do
-        local src="${DATA_SOURCES[$key]}"
-        local full_path="$KIROCREW_DIR/$src"
-        
-        if [ -e "$full_path" ]; then
-            if [ -d "$full_path" ]; then
-                local count
-                count=$(find "$full_path" -type f | wc -l)
-                echo "  ✓ $key ($count files)"
-            else
-                local size
-                size=$(du -h "$full_path" | cut -f1)
-                echo "  ✓ $key ($size)"
-            fi
-        else
-            echo "  ✗ $key (not found)"
+    require_python
+    log_info "Machine ID: $(get_machine_id)"
+    log_info "Backend:    $BACKEND"
+    log_info "Sync repo:  $SYNC_REPO"
+    echo
+
+    if [ -d "$SYNC_REPO/.git" ]; then
+        if repo_has_commit; then
+            local last
+            last="$(git_repo log -1 --format='%cr (%h) %s' "$SYNC_BRANCH")"
+            log_info "Last sync commit: $last"
         fi
-    done
+        if [ -f "$SYNC_REPO/.git/MERGE_HEAD" ]; then
+            # Unpacking now would overwrite the half-merged tree.
+            log_error "A merge is in progress; run '$0 resume' after resolving."
+            git_repo diff --name-only --diff-filter=U | sed 's/^/    /'
+        else
+            kcsync unpack --kirocrew-dir "$KIROCREW_DIR" --repo "$SYNC_REPO" \
+                > /dev/null 2>&1 || true
+            local changed
+            changed="$(git_repo status --porcelain | wc -l | tr -d ' ')"
+            if [ "$changed" -gt 0 ]; then
+                log_warn "$changed path(s) changed locally since last sync:"
+                git_repo status --porcelain | head -20 | sed 's/^/    /'
+            else
+                log_success "No local changes since last sync"
+            fi
+        fi
+    else
+        log_warn "No sync repo yet. Run: $0 sync"
+    fi
+
+    echo
+    kcsync doctor --kirocrew-dir "$KIROCREW_DIR" || true
+    echo
+    backend_status
 }
 
 cmd_paths() {
-    local db
-    db="$(knowledge_db_path "$KIROCREW_DIR")"
+    local db="$KIROCREW_DIR/workspace/knowledge/knowledge.db"
 
     log_info "Knowledge source paths on this machine"
 
-    if ! command -v python3 &> /dev/null; then
-        log_error "python3 is required for path checks"
-        exit 1
-    fi
+    require_python
     if [ ! -f "$db" ]; then
         log_warn "No knowledge database at $db"
         return 0
@@ -396,19 +542,32 @@ cmd_paths() {
     else
         log_info "Path map: none ($KIROCREW_PATH_MAP)"
     fi
+    if [ "$SYNC_PORTABLE_PATHS" != "1" ]; then
+        log_warn "SYNC_PORTABLE_PATHS=0 - paths sync verbatim"
+    fi
     echo
 
-    if python3 "$PORTABLE_PATHS_TOOL" report "$db"; then
+    if "$PYTHON_BIN" "$PORTABLE_PATHS_TOOL" report "$db"; then
         log_success "All source paths resolve on this machine"
     else
         log_warn "Some source paths need attention (see above)"
     fi
 }
 
+cmd_doctor() {
+    require_python
+    require_git
+    kcsync doctor --kirocrew-dir "$KIROCREW_DIR" || true
+    if [ -d "$SYNC_REPO/.git" ]; then
+        echo
+        log_info "Preflight gates:"
+        kcsync gates --kirocrew-dir "$KIROCREW_DIR" --repo "$SYNC_REPO" || true
+    fi
+}
+
 cmd_init() {
     log_info "Initializing KiroCrew Sync..."
-    
-    # Create config file
+
     if [ ! -f "$CONFIG_FILE" ]; then
         cat > "$CONFIG_FILE" << 'EOF'
 #!/usr/bin/env bash
@@ -431,70 +590,95 @@ export KIROCREW_PATH_MAP="$KIROCREW_DIR/path_map.conf"
 EOF
         log_success "Created config file: $CONFIG_FILE"
     fi
-    
-    # Create backends directory
+
     mkdir -p "$SCRIPT_DIR/backends"
-    
+    require_python
+    ensure_repo
+
     log_success "Initialization complete"
     log_info "Next steps:"
     log_info "  1. Edit $CONFIG_FILE to set your backend"
     log_info "  2. Configure backend credentials in backends/\${SYNC_BACKEND}.sh"
-    log_info "  3. Run: ./kirocrew-sync.sh push"
+    log_info "  3. Run: ./kirocrew-sync.sh doctor"
+    log_info "  4. Run: ./kirocrew-sync.sh sync"
 }
 
 show_help() {
     cat << EOF
-KiroCrew Sync - Cross-platform data synchronization
+KiroCrew Sync - three-way data synchronization
 
-Usage: $0 <command>
+Usage: $0 <command> [options]
 
 Commands:
-  init        Initialize configuration
-  push        Push local data to remote storage
-  pull        Pull remote data to local machine
-  status      Show sync status and local data info
+  init        Initialize configuration and the local sync repo
+  sync        Two-way sync: merge local and remote changes
+  push        Publish local state without merging
+  pull        Sync, preferring remote changes on conflict
+  resume      Finish a sync that stopped on conflicts
+  status      Show pending changes and backend state
+  doctor      Inspect local data and run preflight checks
   paths       Check whether knowledge source paths survive a sync
-  help        Show this help message
+  help        Show this message
+
+Options:
+  --strategy <s>   Conflict resolution: auto (default), local-wins,
+                   remote-wins, manual
+  --dry-run        Analyze and merge, but do not write or publish
+  --force          Proceed even if a preflight gate fails
 
 Environment variables:
-  SYNC_BACKEND          Storage backend to use (default: gdrive)
+  SYNC_BACKEND          Storage backend (default: gdrive)
   KIROCREW_DIR          KiroCrew data directory (default: ~/.kiro/crew)
   KIROCREW_PATH_MAP     Path mapping file (default: \$KIROCREW_DIR/path_map.conf)
   SYNC_PORTABLE_PATHS   Rewrite knowledge paths for portability (default: 1)
 
 Examples:
-  $0 init
-  $0 push
-  SYNC_BACKEND=s3 $0 pull
-  $0 status
-  $0 paths
+  $0 sync
+  $0 sync --dry-run
+  $0 sync --strategy local-wins
+  SYNC_BACKEND=s3 $0 sync
 
+Conflicts are resolved per row, not per file. "auto" keeps the most
+recently updated version of each row and never drops an edit in favour
+of a deletion. See docs/adr/0002-three-way-sync-via-unpacked-git-repo.md
 EOF
 }
 
-# Main command dispatcher
-case "${1:-help}" in
-    init)
-        cmd_init
-        ;;
-    push)
-        cmd_push
-        ;;
-    pull)
-        cmd_pull
-        ;;
-    status)
-        cmd_status
-        ;;
-    paths)
-        cmd_paths
-        ;;
-    help|--help|-h)
-        show_help
-        ;;
+COMMAND="${1:-help}"
+shift || true
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --strategy)
+            STRATEGY="${2:-auto}"; shift 2 ;;
+        --strategy=*)
+            STRATEGY="${1#*=}"; shift ;;
+        --dry-run)  DRY_RUN=true; shift ;;
+        --force)    FORCE=true; shift ;;
+        *)
+            log_error "Unknown option: $1"; show_help; exit 1 ;;
+    esac
+done
+
+case "$STRATEGY" in
+    auto|local-wins|remote-wins|manual) ;;
+    *) log_error "Unknown strategy: $STRATEGY"
+       log_info  "Valid: auto, local-wins, remote-wins, manual"
+       exit 1 ;;
+esac
+
+case "$COMMAND" in
+    init)    cmd_init ;;
+    sync)    cmd_sync ;;
+    push)    cmd_push ;;
+    pull)    cmd_pull ;;
+    resume)  cmd_resume ;;
+    status)  cmd_status ;;
+    doctor)  cmd_doctor ;;
+    paths)   cmd_paths ;;
+    help|--help|-h) show_help ;;
     *)
-        log_error "Unknown command: $1"
+        log_error "Unknown command: $COMMAND"
         show_help
-        exit 1
-        ;;
+        exit 1 ;;
 esac
