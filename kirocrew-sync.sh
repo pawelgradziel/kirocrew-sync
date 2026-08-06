@@ -54,6 +54,15 @@ fi
 # shellcheck source=/dev/null
 source "$BACKEND_FILE"
 
+# Path portability: knowledge-base paths are rewritten to a machine-independent
+# form on the way out and back to this machine's paths on the way in, so folder
+# sources keep working after a sync. Set SYNC_PORTABLE_PATHS=0 to sync URIs
+# verbatim instead.
+PORTABLE_PATHS_TOOL="$SCRIPT_DIR/lib/portable_paths.py"
+SYNC_PORTABLE_PATHS="${SYNC_PORTABLE_PATHS:-1}"
+KIROCREW_PATH_MAP="${KIROCREW_PATH_MAP:-$KIROCREW_DIR/path_map.conf}"
+export KIROCREW_PATH_MAP
+
 # Data sources to sync
 declare -A DATA_SOURCES=(
     ["sessions"]="sessions"
@@ -70,12 +79,27 @@ declare -A DATA_SOURCES=(
     ["lessons.db"]="data/lessons.db"
 )
 
+# Refuse to sync while KiroCrew is running, so a half-written database never
+# travels. The pattern matches this script too -- its own name contains
+# "kirocrew" -- so self-matches are filtered out before deciding.
 check_kirocrew_running() {
-    if pgrep -f "kirocrew" > /dev/null; then
+    local self
+    self="$(basename "${BASH_SOURCE[0]}")"
+    local pid args
+
+    while IFS= read -r pid; do
+        [ -n "$pid" ] || continue
+        [ "$pid" != "$$" ] || continue
+        args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+        case "$args" in
+            "" | *"$self"*) continue ;;
+        esac
         log_error "KiroCrew is currently running. Please stop it before syncing."
+        log_info "Running as: $args"
         log_info "Run: pkill -f kirocrew"
         return 1
-    fi
+    done < <(pgrep -f "kirocrew" 2>/dev/null || true)
+
     return 0
 }
 
@@ -88,6 +112,71 @@ get_machine_id() {
         echo "$machine_id" > "$KIROCREW_DIR/.machine_id"
         echo "$machine_id"
     fi
+}
+
+knowledge_db_path() {
+    # knowledge.db under a bundle directory or under KIROCREW_DIR
+    echo "$1/${DATA_SOURCES[knowledge]}/knowledge.db"
+}
+
+# Rewrite the knowledge paths in a BUNDLE copy of the database. The live
+# database is never touched: KiroCrew resolves source URIs with a bare
+# Path(uri) and does not expand "~", so it needs real absolute paths locally.
+# Portable paths exist only while the data is in transit.
+translate_bundle_paths() {
+    local bundle_dir="$1"
+    local direction="$2"
+    local db
+    db="$(knowledge_db_path "$bundle_dir")"
+
+    [ "$SYNC_PORTABLE_PATHS" = "1" ] || return 0
+    [ -f "$db" ] || return 0
+
+    if ! command -v python3 &> /dev/null; then
+        log_warn "python3 not found - knowledge paths sent as-is (folder sources may break on other machines)"
+        return 0
+    fi
+
+    if [ "$direction" = "encode" ]; then
+        log_info "Making knowledge paths portable..."
+    else
+        log_info "Resolving knowledge paths for this machine..."
+    fi
+
+    if python3 "$PORTABLE_PATHS_TOOL" "$direction" "$db"; then
+        log_success "Knowledge paths translated"
+    else
+        log_warn "Path translation failed - continuing with paths as stored"
+    fi
+}
+
+# A SQLite database and its write-ahead log are a matched pair. A bundle that
+# carries a checkpointed .db with no -wal beside it must not inherit this
+# machine's older -wal, which SQLite would replay onto the incoming file.
+drop_stale_wal() {
+    local bundle_path="$1"
+    local dest_path="$2"
+
+    if [ -d "$bundle_path" ]; then
+        local db
+        while IFS= read -r db; do
+            drop_stale_wal "$db" "$dest_path/${db#"$bundle_path"/}"
+        done < <(find "$bundle_path" -type f -name '*.db')
+        return 0
+    fi
+
+    case "$bundle_path" in
+        *.db) ;;
+        *) return 0 ;;
+    esac
+
+    local suffix
+    for suffix in -wal -shm; do
+        if [ ! -e "${bundle_path}${suffix}" ] && [ -e "${dest_path}${suffix}" ]; then
+            rm -f "${dest_path}${suffix}"
+            log_info "Removed stale $(basename "${dest_path}${suffix}")"
+        fi
+    done
 }
 
 create_manifest() {
@@ -188,7 +277,8 @@ apply_sync_bundle() {
         
         if [ -e "$source_path" ]; then
             mkdir -p "$(dirname "$dest_path")"
-            
+            drop_stale_wal "$source_path" "$dest_path"
+
             if [ -d "$source_path" ]; then
                 rsync -a --exclude="*.lock" --exclude="*.tmp" "$source_path/" "$dest_path/"
             else
@@ -211,7 +301,8 @@ cmd_push() {
     trap 'rm -rf "$temp_dir"' EXIT
     
     prepare_sync_bundle "$temp_dir"
-    
+    translate_bundle_paths "$temp_dir" encode
+
     # Call backend-specific push
     backend_push "$temp_dir"
     
@@ -231,6 +322,7 @@ cmd_pull() {
     backend_pull "$temp_dir"
     
     if [ -f "$temp_dir/manifest.json" ]; then
+        translate_bundle_paths "$temp_dir" decode
         apply_sync_bundle "$temp_dir"
         log_success "Pull completed"
     else
@@ -272,6 +364,35 @@ cmd_status() {
     done
 }
 
+cmd_paths() {
+    local db
+    db="$(knowledge_db_path "$KIROCREW_DIR")"
+
+    log_info "Knowledge source paths on this machine"
+
+    if ! command -v python3 &> /dev/null; then
+        log_error "python3 is required for path checks"
+        exit 1
+    fi
+    if [ ! -f "$db" ]; then
+        log_warn "No knowledge database at $db"
+        return 0
+    fi
+
+    if [ -f "$KIROCREW_PATH_MAP" ]; then
+        log_info "Path map: $KIROCREW_PATH_MAP"
+    else
+        log_info "Path map: none ($KIROCREW_PATH_MAP)"
+    fi
+    echo
+
+    if python3 "$PORTABLE_PATHS_TOOL" report "$db"; then
+        log_success "All source paths resolve on this machine"
+    else
+        log_warn "Some source paths need attention (see above)"
+    fi
+}
+
 cmd_init() {
     log_info "Initializing KiroCrew Sync..."
     
@@ -286,6 +407,13 @@ export SYNC_BACKEND="gdrive"
 
 # KiroCrew data directory (override if needed)
 export KIROCREW_DIR="$HOME/.kiro/crew"
+
+# Rewrite knowledge folder paths so they survive a sync (0 to disable)
+export SYNC_PORTABLE_PATHS=1
+
+# This machine's own locations, for folders outside $HOME or laid out
+# differently here (see path_map.conf.example)
+export KIROCREW_PATH_MAP="$KIROCREW_DIR/path_map.conf"
 
 # Backend-specific settings (edit backends/*.sh for credentials)
 EOF
@@ -313,17 +441,21 @@ Commands:
   push        Push local data to remote storage
   pull        Pull remote data to local machine
   status      Show sync status and local data info
+  paths       Check whether knowledge source paths survive a sync
   help        Show this help message
 
 Environment variables:
-  SYNC_BACKEND    Storage backend to use (default: gdrive)
-  KIROCREW_DIR    KiroCrew data directory (default: ~/.kiro/crew)
+  SYNC_BACKEND          Storage backend to use (default: gdrive)
+  KIROCREW_DIR          KiroCrew data directory (default: ~/.kiro/crew)
+  KIROCREW_PATH_MAP     Path mapping file (default: \$KIROCREW_DIR/path_map.conf)
+  SYNC_PORTABLE_PATHS   Rewrite knowledge paths for portability (default: 1)
 
 Examples:
   $0 init
   $0 push
   SYNC_BACKEND=s3 $0 pull
   $0 status
+  $0 paths
 
 EOF
 }
@@ -341,6 +473,9 @@ case "${1:-help}" in
         ;;
     status)
         cmd_status
+        ;;
+    paths)
+        cmd_paths
         ;;
     help|--help|-h)
         show_help

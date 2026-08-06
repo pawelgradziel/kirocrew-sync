@@ -55,6 +55,19 @@ rclone config  # Use the SAME settings as above
 
 Your KiroCrew data is now synced. Use `push` and `pull` commands to keep laptops in sync.
 
+## Step 5: Check your knowledge sources
+
+```bash
+./kirocrew-sync.sh paths
+```
+
+Knowledge folder sources are stored as filesystem paths, so a source added on
+one laptop has to find its folder on the other. Anything under your home
+directory travels automatically (`~/code/docs` works on both). Folders outside
+`$HOME`, or repos kept under different subdirectories on each machine, need one
+line per machine in `~/.kiro/crew/path_map.conf` — see
+[README.md](README.md#knowledge-paths-across-machines).
+
 ## Daily Usage
 
 ```bash

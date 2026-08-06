@@ -9,6 +9,7 @@ Cross-platform synchronization utility for KiroCrew data with modular storage ba
 - 🖥️ **Cross-platform**: Works on Linux and macOS
 - 🔒 **Safe**: Checks if KiroCrew is running, excludes lock files
 - 📦 **Complete**: Syncs all essential data (sessions, knowledge, artifacts, memory)
+- 🧭 **Portable paths**: Knowledge folder sources keep working on machines with a different layout
 
 ## What Gets Synced
 
@@ -213,6 +214,9 @@ Sync directly to a remote server or NAS via SSH.
 # Check sync status
 ./kirocrew-sync.sh status
 
+# Check that knowledge source paths survive a sync
+./kirocrew-sync.sh paths
+
 # Show help
 ./kirocrew-sync.sh help
 ```
@@ -284,6 +288,104 @@ crontab -e
 0 * * * * cd /path/to/kirocrew-sync && ./kirocrew-sync.sh pull 2>&1 | logger -t kirocrew-sync
 ```
 
+## Knowledge Paths Across Machines
+
+A knowledge folder source is stored as a plain filesystem path. Added on a
+laptop, `/home/alice/dev/groover/docs` means nothing on a desktop where the same
+repository lives under `/home/alice/work/projects/groover/docs` — the source
+goes missing, and with it the entity graph built from those documents.
+
+This tool translates those paths at the sync boundary:
+
+```
+push:  /home/alice/dev/groover/docs  ->  ~/dev/groover/docs   (in the bundle)
+pull:  ~/dev/groover/docs            ->  /Users/pawel/dev/groover/docs
+```
+
+Only the copy in transit is portable. Your local `knowledge.db` always holds
+real absolute paths, because KiroCrew resolves source URIs with a bare
+`Path(uri)` and does not expand `~` — a tilde stored in the live database would
+break every folder source, including on the machine that created it. The
+reasoning and the options weighed are recorded in
+[ADR 0001](docs/adr/0001-knowledge-path-portability.md).
+
+Three columns travel: the source URI, the per-file ingest state under it, and
+the tombstones for auto-discovered project folders. Nothing else is touched.
+
+Run `./kirocrew-sync.sh paths` to see where you stand:
+
+```
+ℹ Knowledge source paths on this machine
+ℹ Path map: none (/home/pawel/.kiro/crew/path_map.conf)
+
+  3 source(s), 3 path-based
+  ✓ Groover Docs [local_folder]
+      /home/pawel/code/groover/docs
+      syncs as ~/code/groover/docs
+  ✗ Old Notes [local_folder]
+      /home/pawel/archive/notes
+      path not found on this machine
+      syncs as ~/archive/notes
+  ⚠ Team Wiki [local_folder]
+      /mnt/shared/wiki
+      outside $HOME and unmapped -- will not survive sync
+
+  portable: 2   will not survive sync: 1   missing on this machine: 1
+  → give machine-specific paths a name in the path map so they travel:
+      see path_map.conf.example
+```
+
+### When `~` is not enough
+
+Anything under `$HOME` travels for free, including across Linux and macOS. Two
+cases need help:
+
+- the location sits outside `$HOME` (`/mnt/shared`, `/opt`)
+- the same repositories live under different subdirectories of `$HOME` on each
+  machine (`~/dev` here, `~/work/projects` there)
+
+For those, name the location once per machine in `~/.kiro/crew/path_map.conf`:
+
+```bash
+cp path_map.conf.example ~/.kiro/crew/path_map.conf
+```
+
+```bash
+# On the laptop
+CODE   = ~/dev
+SHARED = /mnt/shared
+
+# On the desktop
+CODE   = ~/work/projects
+SHARED = /Volumes/shared
+```
+
+A source at `~/dev/groover/docs` then travels as `${CODE}/groover/docs` and
+lands on the desktop as `~/work/projects/groover/docs`. The map is
+machine-specific and is never synced — that is what makes it work.
+
+When a `${NAME}` has no entry on the receiving machine, the path is left
+visibly unresolved and reported, rather than silently pointing a source at the
+wrong directory.
+
+### Notes and limits
+
+- **Relative paths** (`./docs`) are reported and left alone. They resolve
+  against the working directory of whatever process added them, which is not
+  knowable later — guessing would invent a wrong path.
+- **Symlinks are not resolved.** The logical path you typed
+  (`~/projects/groover`) travels better than what it points at on one machine
+  (`/mnt/storage/repos/groover`).
+- **Duplicates are never merged.** If two sources differ only in spelling
+  (`/home/you/docs` and `~/docs`), normalizing would collide on a UNIQUE
+  constraint; the row is left as-is and reported so you can merge it yourself.
+- **Paths outside `$HOME` with no mapping stay absolute.** Nothing here can
+  make them portable, so they are flagged rather than mangled.
+- Set `SYNC_PORTABLE_PATHS=0` to sync URIs verbatim, and
+  `KIROCREW_PATH_MAP=/some/file` to keep the map elsewhere.
+- Requires `python3` (standard library only — no packages to install). Without
+  it, sync still works and warns that paths are travelling verbatim.
+
 ## Safety Features
 
 - **Running check**: Refuses to sync if KiroCrew is currently running
@@ -303,6 +405,19 @@ pkill -f kirocrew
 ```bash
 ./kirocrew-sync.sh status
 ```
+
+### A knowledge source went missing after a sync
+```bash
+./kirocrew-sync.sh paths
+```
+
+Sources marked `✗ path not found on this machine` point at a directory that
+does not exist here. Either the layout differs — add a mapping, see
+[Knowledge Paths Across Machines](#knowledge-paths-across-machines) — or the
+folder really is gone and the source should be removed in KiroCrew.
+
+Sources marked `⚠ outside $HOME and unmapped` still work here but will break on
+the next machine. Give them a name in the path map before pushing.
 
 ### Backend-specific issues
 
@@ -361,6 +476,16 @@ To add a new storage backend:
    ```
 
 See existing backends for examples.
+
+## Tests
+
+```bash
+./tests/test_portable_paths.sh   # path translation
+./tests/test_sync_paths.sh       # bundle/apply round trip between two machines
+```
+
+Both simulate a second machine by overriding `$HOME`, so they need no remote
+storage and touch nothing outside a temporary directory.
 
 ## Security Considerations
 

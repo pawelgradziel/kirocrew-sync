@@ -1,0 +1,46 @@
+# KiroCrew Sync - path map
+#
+# Copy to ~/.kiro/crew/path_map.conf (or point KIROCREW_PATH_MAP somewhere else)
+# and declare, ON EACH MACHINE, where its shared locations actually live.
+#
+# This file is machine-specific and is NOT synced. That is the whole point:
+# the same name resolves to a different directory on each machine.
+#
+# Format:  NAME = /absolute/path/on/this/machine
+#
+# Anything under $HOME already travels as ~/... and needs no entry here. Use a
+# map when a location sits outside $HOME, or when two machines keep the same
+# repositories under different subdirectories of $HOME.
+
+# --- Example: repos live in a different place on each machine ---------------
+#
+#   Laptop  (~/dev/groover)      ->  CODE = ~/dev
+#   Desktop (~/work/projects/..) ->  CODE = ~/work/projects
+#
+# A source added on the laptop as ~/dev/groover/docs is stored in the sync
+# bundle as ${CODE}/groover/docs and lands on the desktop as
+# ~/work/projects/groover/docs.
+
+# CODE = ~/dev
+
+# --- Example: a location outside $HOME --------------------------------------
+#
+#   Linux box:  SHARED = /mnt/shared
+#   macOS box:  SHARED = /Volumes/shared
+#
+# Without a map, /mnt/shared/wiki stays absolute and breaks on the Mac.
+
+# SHARED = /mnt/shared
+
+# --- Example: cross-OS home directories -------------------------------------
+#
+# ~/ already handles /home/you vs /Users/you, so no entry is needed for paths
+# under your home directory on Linux and macOS.
+
+# Notes:
+# - Names are case-sensitive and may contain letters, digits and underscores.
+# - Values may use ~ and $VARS; they must resolve to an absolute path.
+# - HOME is built in -- use ~ rather than declaring it here.
+# - When two entries overlap, the longest matching path wins, so
+#   "WORK = ~/code/work" takes precedence over "CODE = ~/code".
+# - Run ./kirocrew-sync.sh paths to see how each source resolves.
