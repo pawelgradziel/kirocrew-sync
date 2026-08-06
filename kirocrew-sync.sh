@@ -8,9 +8,16 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-KIROCREW_DIR="${KIROCREW_DIR:-$HOME/.kiro/crew}"
 CONFIG_FILE="$SCRIPT_DIR/config.sh"
-BACKEND="${SYNC_BACKEND:-gdrive}"
+
+# Settings come from the environment or from config.sh, and the environment
+# wins so a single run can be redirected: SYNC_BACKEND=s3 ./kirocrew-sync.sh
+# push. config.sh is sourced below and would overwrite these, so remember what
+# the environment actually set before that happens.
+ENV_SYNC_BACKEND="${SYNC_BACKEND:-}"
+ENV_KIROCREW_DIR="${KIROCREW_DIR:-}"
+ENV_SYNC_PORTABLE_PATHS="${SYNC_PORTABLE_PATHS:-}"
+ENV_KIROCREW_PATH_MAP="${KIROCREW_PATH_MAP:-}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -45,6 +52,11 @@ else
     exit 1
 fi
 
+# Resolve settings: environment first, config.sh second, built-in default last.
+BACKEND="${ENV_SYNC_BACKEND:-${SYNC_BACKEND:-gdrive}}"
+KIROCREW_DIR="${ENV_KIROCREW_DIR:-${KIROCREW_DIR:-$HOME/.kiro/crew}}"
+export KIROCREW_DIR
+
 # Load storage backend
 BACKEND_FILE="$SCRIPT_DIR/backends/${BACKEND}.sh"
 if [ ! -f "$BACKEND_FILE" ]; then
@@ -59,8 +71,8 @@ source "$BACKEND_FILE"
 # sources keep working after a sync. Set SYNC_PORTABLE_PATHS=0 to sync URIs
 # verbatim instead.
 PORTABLE_PATHS_TOOL="$SCRIPT_DIR/lib/portable_paths.py"
-SYNC_PORTABLE_PATHS="${SYNC_PORTABLE_PATHS:-1}"
-KIROCREW_PATH_MAP="${KIROCREW_PATH_MAP:-$KIROCREW_DIR/path_map.conf}"
+SYNC_PORTABLE_PATHS="${ENV_SYNC_PORTABLE_PATHS:-${SYNC_PORTABLE_PATHS:-1}}"
+KIROCREW_PATH_MAP="${ENV_KIROCREW_PATH_MAP:-${KIROCREW_PATH_MAP:-$KIROCREW_DIR/path_map.conf}}"
 export KIROCREW_PATH_MAP
 
 # Data sources to sync

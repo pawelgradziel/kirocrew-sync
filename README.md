@@ -234,10 +234,15 @@ SYNC_BACKEND=s3 ./kirocrew-sync.sh push
 SYNC_BACKEND=rsync ./kirocrew-sync.sh push
 ```
 
-Or edit `config.sh`:
+Or edit `config.sh` to set the backend for every run:
 ```bash
 export SYNC_BACKEND="gdrive"  # or s3, rsync
 ```
+
+The environment wins over `config.sh`, so the one-off form above overrides the
+configured backend for a single run. The same order — environment, then
+`config.sh`, then the built-in default — applies to `KIROCREW_DIR`,
+`SYNC_PORTABLE_PATHS` and `KIROCREW_PATH_MAP`.
 
 ## Typical Workflow
 
@@ -480,11 +485,12 @@ See existing backends for examples.
 ## Tests
 
 ```bash
-./tests/test_portable_paths.sh   # path translation
-./tests/test_sync_paths.sh       # bundle/apply round trip between two machines
+./tests/test_portable_paths.sh     # path translation
+./tests/test_sync_paths.sh         # bundle/apply round trip between two machines
+./tests/test_config_precedence.sh  # environment vs config.sh vs defaults
 ```
 
-Both simulate a second machine by overriding `$HOME`, so they need no remote
+They simulate a second machine by overriding `$HOME`, so they need no remote
 storage and touch nothing outside a temporary directory.
 
 ## Security Considerations
