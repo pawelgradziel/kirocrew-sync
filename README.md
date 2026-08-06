@@ -1,34 +1,93 @@
 # KiroCrew Sync
 
-Cross-platform synchronization utility for KiroCrew data with modular storage backends.
+Cross-platform synchronization for KiroCrew data with modular storage backends.
+
+**Work on two machines without choosing which one wins.** Most sync tools for
+this kind of data copy a directory in one direction and overwrite whatever was
+on the other side. KiroCrew Sync does a real **three-way merge** instead: it
+remembers the state at your last sync, works out what changed on each machine
+since then, and combines both.
+
+```bash
+./kirocrew-sync.sh sync
+```
+
+## Why three-way sync matters here
+
+A one-directional copy forces you to remember which laptop has newer data, and
+punishes you when both do. Three-way sync removes that problem:
+
+- **Both sides' work is kept.** A lesson learned on your laptop and a knowledge
+  item added on your desktop both survive. They are different rows, so they do
+  not conflict at all.
+- **Conflicts are per row, not per file.** Two machines editing different
+  entries in the same database is a normal merge, not a conflict. Only the same
+  row edited on both sides needs a decision.
+- **No clock-skew guesswork.** The merge base is found by content hash, not by
+  comparing timestamps across machines whose clocks may disagree.
+- **Deletions never silently beat edits.** If one machine deletes something the
+  other machine edited, the edit survives by default.
+- **More than two machines work.** Each machine publishes its own state; every
+  other machine merges it.
+
+This is possible because sync operates on an *unpacked* form of your data —
+databases are exported to one text file per table, merged row by row, then
+written back. That design also fixes a subtler problem: KiroCrew's SQLite
+databases run in WAL mode, and their `.db` files are frequently near-empty
+while the real content sits in the `-wal`. Copying the files can move a 4 KB
+stub. Exporting through SQLite cannot.
+
+See [ADR 0002](docs/adr/0002-three-way-sync-via-unpacked-git-repo.md) for the
+full design and its trade-offs.
 
 ## Features
 
-- 🔄 **Bidirectional sync**: Push and pull your KiroCrew data
-- 🔌 **Modular backends**: Google Drive, S3, rsync, or custom
+- 🔀 **Three-way merge**: real bidirectional sync, per row, with conflict strategies
+- 🔌 **Modular backends**: Google Drive, S3, rsync, local directory, or custom
 - 🖥️ **Cross-platform**: Works on Linux and macOS
-- 🔒 **Safe**: Checks if KiroCrew is running, excludes lock files
-- 📦 **Complete**: Syncs all essential data (sessions, knowledge, artifacts, memory)
 - 🧭 **Portable paths**: Knowledge folder sources keep working on machines with a different layout
+- 🔐 **Credential-safe**: explicit allowlist; API tokens never leave the machine
+- ↩️ **Reversible**: every sync is a git commit; databases are backed up before writes
+- 🔎 **Inspectable**: `doctor`, `status`, `paths` and `--dry-run` show exactly what will happen
 
 ## What Gets Synced
 
-The following KiroCrew data is included in sync:
+**Databases** (merged row by row):
 
-- **Chat sessions** (`sessions/` directory) - All your conversation history
-- **Memory database** (`memory.db`) - Searchable chat history index
-- **Memory vector index** (`memory_index.db`) - Semantic search index
-- **Session map** (`session_map.json`) - Session metadata
-- **Artifacts** (`data/artifacts.db`) - Saved widgets and artifacts
-- **Knowledge base** (`workspace/knowledge/`) - Your knowledge library
-- **Workspace memory** (`workspace/memory/`) - Workspace-specific memory
-- **Learned lessons** (`data/lessons.db`) - Saved corrections and preferences
-- **Configuration** (`config.json`) - KiroCrew settings
-- **Tags** (`tags.json`) - Tag metadata
+| Source | Contents |
+| --- | --- |
+| `memory.db` | Semantic and episodic memory, learned lessons, memory event log |
+| `workspace/knowledge/knowledge.db` | Knowledge items, entities, relations, sources |
+
+**Files** (merged structurally or by union):
+
+| Source | Contents |
+| --- | --- |
+| `sessions/*.jsonl` | Chat transcripts (append-only union) |
+| `config.json`, `tags.json`, `tag_boards.json` | Settings (merged key by key) |
+| `session_map.json`, `hooks.json`, `model_windows.json` | Session and runtime metadata |
+| `workspace/memory/` | Workspace memory notes |
+| `artifacts/` | Saved widgets and artifacts |
+
+**Deliberately not synced:**
+
+- `memory_index.db` and FTS indexes — derived data, rebuilt locally after every sync
+- `mcp.json`, `.local_secret`, `token_signing.key`, `sel_hmac.key` — credentials
+- `security_events.jsonl`, `audit.log`, `gateway.log` — local audit logs (often 30 MB+)
+- `.machine_id`, `path_map.conf`, PID files, lock files, `run/`, `cache/`, `logs/`
+- Machine-local database tables: filesystem scan state and transient job state
+
+Credential-shaped fields inside synced JSON (`bot_token`, `app_password`,
+`api_key`, …) are stripped before upload and restored from your local file
+afterwards, so each machine keeps its own.
 
 ## Installation
 
 ### Prerequisites
+
+The sync engine needs **Python 3.8+** (standard library only, including
+`sqlite3`) and **git**, which supplies the merge base and conflict handling.
+Both ship with macOS and most Linux distributions.
 
 The default backend is Google Drive, which needs [rclone](https://rclone.org/):
 
@@ -65,6 +124,7 @@ Other backends need their own tools — see [Storage Backends](#storage-backends
 | **Google Drive** (default, recommended) | `gdrive` | `rclone` | [below](#google-drive-default) |
 | AWS S3 | `s3` | `awscli` | [docs/backends/s3.md](docs/backends/s3.md) |
 | Rsync (direct host or NAS) | `rsync` | `rsync`, SSH access | [docs/backends/rsync.md](docs/backends/rsync.md) |
+| Local directory (Dropbox, Syncthing, NAS mount, USB) | `local` | nothing | set `LOCAL_SYNC_DIR` |
 | Your own | any | whatever you script | [docs/backends/custom.md](docs/backends/custom.md) |
 
 ### Google Drive (Default)
@@ -122,22 +182,32 @@ below are done.
 ### Other Backends
 
 Prefer somewhere else? Set up [AWS S3](docs/backends/s3.md), sync straight to a
-machine you own with [rsync](docs/backends/rsync.md), or
+machine you own with [rsync](docs/backends/rsync.md), point the `local` backend
+at a folder that already reaches your other machines, or
 [write your own](docs/backends/custom.md) — a backend is one bash file with
 three functions.
+
+```bash
+# Local directory: a Dropbox/Syncthing folder, a NAS mount, a USB drive
+export SYNC_BACKEND=local
+export LOCAL_SYNC_DIR="$HOME/Dropbox/KiroCrew-Sync"
+```
 
 ## Usage
 
 ### Basic Commands
 
 ```bash
-# Push local data to remote storage
-./kirocrew-sync.sh push
+# Two-way sync: merge local and remote changes
+./kirocrew-sync.sh sync
 
-# Pull remote data to local machine
-./kirocrew-sync.sh pull
+# See what would happen, without writing or publishing anything
+./kirocrew-sync.sh sync --dry-run
 
-# Check sync status
+# Inspect local data and run preflight checks
+./kirocrew-sync.sh doctor
+
+# Show pending changes and backend state
 ./kirocrew-sync.sh status
 
 # Check that knowledge source paths survive a sync
@@ -147,17 +217,53 @@ three functions.
 ./kirocrew-sync.sh help
 ```
 
+### Conflict strategies
+
+A conflict means *the same row was edited on both machines since the last sync*.
+Different rows, different tables, and different files are merged without asking.
+
+```bash
+# Default: keep the most recently updated version of each row
+./kirocrew-sync.sh sync --strategy auto
+
+# Prefer this machine on every conflicting row
+./kirocrew-sync.sh sync --strategy local-wins
+
+# Prefer the other machine
+./kirocrew-sync.sh sync --strategy remote-wins
+
+# Stop and let you resolve conflicts by hand
+./kirocrew-sync.sh sync --strategy manual
+```
+
+With `manual`, resolve the conflicts inside `~/.kiro/crew/.sync/repo`, then run
+`./kirocrew-sync.sh resume`. Automatic resolutions are always reported and
+logged to `~/.kiro/crew/.sync/conflicts.jsonl`.
+
+### One-directional commands
+
+`sync` is the command you want. These remain for the cases where you know which
+side should win:
+
+```bash
+# Publish local state without merging
+./kirocrew-sync.sh push
+
+# Sync, preferring remote on conflict
+./kirocrew-sync.sh pull
+```
+
 ### Switching Between Backends
 
 ```bash
 # Use Google Drive
-SYNC_BACKEND=gdrive ./kirocrew-sync.sh push
+SYNC_BACKEND=gdrive ./kirocrew-sync.sh sync
 
 # Use S3
-SYNC_BACKEND=s3 ./kirocrew-sync.sh push
+SYNC_BACKEND=s3 ./kirocrew-sync.sh sync
 
 # Use rsync
-SYNC_BACKEND=rsync ./kirocrew-sync.sh push
+SYNC_BACKEND=rsync ./kirocrew-sync.sh sync
 ```
 
 Or edit `config.sh` to set the backend for every run:
@@ -179,7 +285,8 @@ configured backend for a single run. The same order — environment, then
 cd kirocrew-sync
 ./kirocrew-sync.sh init
 # Configure your backend (see Storage Backends above)
-./kirocrew-sync.sh push
+./kirocrew-sync.sh doctor
+./kirocrew-sync.sh sync
 ```
 
 **On Laptop B (second machine):**
@@ -188,17 +295,17 @@ git clone https://github.com/pawelgradziel/kirocrew-sync.git
 cd kirocrew-sync
 ./kirocrew-sync.sh init
 # Configure the SAME backend as Laptop A
-./kirocrew-sync.sh pull
+./kirocrew-sync.sh sync
 ```
 
 **Daily usage:**
 ```bash
-# Before starting work on Laptop B (get latest from Laptop A)
-./kirocrew-sync.sh pull
-
-# After finishing work on Laptop B (share with Laptop A)
-./kirocrew-sync.sh push
+# Whichever laptop you sit down at, and again when you finish
+./kirocrew-sync.sh sync
 ```
+
+There is no push/pull ordering to remember. Changes made on both machines are
+merged, not overwritten.
 
 ### Automated Sync
 
@@ -207,7 +314,7 @@ You can automate syncing with cron or by adding hooks to your shell profile:
 **Option 1: Shell profile hook (automatic)**
 ```bash
 # Add to ~/.bashrc or ~/.zshrc
-alias kirocrew='~/.kiro/crew/workspace/kirocrew-sync/kirocrew-sync.sh pull && command kirocrew'
+alias kirocrew='~/.kiro/crew/workspace/kirocrew-sync/kirocrew-sync.sh sync && command kirocrew'
 ```
 
 **Option 2: Cron job (scheduled)**
@@ -215,8 +322,8 @@ alias kirocrew='~/.kiro/crew/workspace/kirocrew-sync/kirocrew-sync.sh pull && co
 # Edit crontab
 crontab -e
 
-# Pull every hour (when KiroCrew is not running)
-0 * * * * cd /path/to/kirocrew-sync && ./kirocrew-sync.sh pull 2>&1 | logger -t kirocrew-sync
+# Sync every hour (skips the run if KiroCrew is open)
+0 * * * * cd /path/to/kirocrew-sync && ./kirocrew-sync.sh sync 2>&1 | logger -t kirocrew-sync
 ```
 
 ## Knowledge Paths Across Machines
@@ -229,8 +336,8 @@ goes missing, and with it the entity graph built from those documents.
 This tool translates those paths at the sync boundary:
 
 ```
-push:  /home/alice/dev/groover/docs  ->  ~/dev/groover/docs   (in the bundle)
-pull:  ~/dev/groover/docs            ->  /Users/pawel/dev/groover/docs
+unpack:  /home/alice/dev/groover/docs  ->  ~/dev/groover/docs   (in the synced form)
+pack:    ~/dev/groover/docs            ->  /Users/pawel/dev/groover/docs
 ```
 
 Only the copy in transit is portable. Your local `knowledge.db` always holds
@@ -240,8 +347,14 @@ break every folder source, including on the machine that created it. The
 reasoning and the options weighed are recorded in
 [ADR 0001](docs/adr/0001-knowledge-path-portability.md).
 
-Three columns travel: the source URI, the per-file ingest state under it, and
-the tombstones for auto-discovered project folders. Nothing else is touched.
+Two columns travel: the source URI and the tombstones for auto-discovered
+project folders. The per-file ingest state stays put — it records this
+machine's absolute paths and scan timestamps, so it is machine-local and never
+synced at all.
+
+Because paths are translated per row, the portable form is also what the merge
+sees: two machines that added the same folder under different local paths
+resolve to one row rather than two competing ones.
 
 Run `./kirocrew-sync.sh paths` to see where you stand:
 
@@ -319,22 +432,46 @@ wrong directory.
 
 ## Safety Features
 
-- **Running check**: Refuses to sync if KiroCrew is currently running
-- **Lock file exclusion**: Never syncs `.lock` or `.tmp` files
-- **Machine ID tracking**: Each sync includes machine identifier
-- **Manifest**: Every sync creates a manifest with checksums and metadata
+- **Running check**: refuses to write merged data while KiroCrew is running.
+  Reading is safe, so `--dry-run`, `status`, `doctor` and `paths` work any time.
+- **Automatic backups**: every database is copied to
+  `~/.kiro/crew/.sync/backups/<timestamp>/` before any write, and restored
+  automatically if the write fails.
+- **Transactional writes**: all changes to a database apply in one transaction,
+  with foreign-key ordering and a `PRAGMA foreign_key_check` afterwards.
+- **Schema gate**: refuses to merge machines running different KiroCrew
+  versions instead of blending incompatible schemas.
+- **Embedding gate**: refuses to mix vectors from different embedding models,
+  which would otherwise degrade semantic search with no visible error.
+- **Credential allowlist**: only explicitly listed paths are ever published.
+- **Full history**: every sync is a git commit in `~/.kiro/crew/.sync/repo`,
+  so any previous state can be recovered.
 
 ## Troubleshooting
 
-### "KiroCrew is currently running"
+### "KiroCrew is running"
+Quit the KiroCrew app, then re-run. To look around without stopping it:
 ```bash
-pkill -f kirocrew
-./kirocrew-sync.sh push
+./kirocrew-sync.sh sync --dry-run
+```
+
+### "schema drift" or "embedding space mismatch"
+The two machines are on different KiroCrew versions or different embedding
+models. Bring them into line, then sync. To override deliberately:
+```bash
+./kirocrew-sync.sh sync --force
+```
+
+### A sync stopped on conflicts
+```bash
+./kirocrew-sync.sh status                       # see what is unresolved
+git -C ~/.kiro/crew/.sync/repo merge --abort    # start over
+./kirocrew-sync.sh sync --strategy local-wins   # or remote-wins
 ```
 
 ### Check what will be synced
 ```bash
-./kirocrew-sync.sh status
+./kirocrew-sync.sh doctor
 ```
 
 ### A knowledge source went missing after a sync
@@ -367,13 +504,15 @@ For the other backends, see the troubleshooting section of
 ## Tests
 
 ```bash
+./tests/run_tests.sh               # two-machine three-way merge, 45 assertions
 ./tests/test_portable_paths.sh     # path translation
-./tests/test_sync_paths.sh         # bundle/apply round trip between two machines
+./tests/test_sync_paths.sh         # path round trip between two machines
 ./tests/test_config_precedence.sh  # environment vs config.sh vs defaults
 ```
 
-They simulate a second machine by overriding `$HOME`, so they need no remote
-storage and touch nothing outside a temporary directory.
+They simulate a second machine by overriding `$HOME` or by pointing two
+throwaway KiroCrew directories at a local-directory backend, so they need no
+remote storage and touch nothing outside a temporary directory.
 
 ## Security Considerations
 
@@ -381,7 +520,8 @@ storage and touch nothing outside a temporary directory.
 - **AWS credentials**: Stored in `~/.aws/credentials` (never committed)
 - **SSH keys** (rsync): Use your existing SSH setup
 - **Data in transit**: All backends use encrypted connections (HTTPS/SSH)
-- **Local data**: KiroCrew data includes your full chat history and knowledge
+- **Data at rest**: your synced data includes chat history and knowledge, and
+  is **not** end-to-end encrypted. Use a storage location you trust.
 
 **Recommendation:** Use your own OAuth credentials for Google Drive rather than rclone's shared ones.
 
@@ -391,10 +531,9 @@ Contributions welcome! Areas for improvement:
 
 - Additional backends (Dropbox, OneDrive, WebDAV) — see
   [docs/backends/custom.md](docs/backends/custom.md)
-- Conflict detection and resolution
-- Incremental sync (only changed files)
-- Compression before upload
-- End-to-end encryption option
+- End-to-end encryption before upload
+- Automatic schema migration instead of refusing on drift
+- Daemon mode with filesystem watching
 
 ## License
 
