@@ -11,12 +11,15 @@ config.sh
 
 # Local machine-specific files
 .machine_id
+path_map.conf
 
 # Temporary files
 *.tmp
 *.lock
 temp/
 tmp/
+__pycache__/
+*.pyc
 
 # Backup files
 *.bak
