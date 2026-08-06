@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# KiroCrew Sync Configuration
+# Copy this file to config.sh and customize
+
+# Storage backend: gdrive, s3, rsync, or custom
+export SYNC_BACKEND="gdrive"
+
+# KiroCrew data directory (override if non-standard)
+export KIROCREW_DIR="$HOME/.kiro/crew"
+
+# Backend-specific settings
+# Edit backends/${SYNC_BACKEND}.sh for backend credentials and paths
+
+# Google Drive settings (edit backends/gdrive.sh)
+# - GDRIVE_REMOTE_NAME: rclone remote name (default: kirocrew-gdrive)
+# - GDRIVE_SYNC_DIR: folder name in Google Drive (default: KiroCrew-Sync)
+
+# S3 settings (edit backends/s3.sh)
+# - S3_BUCKET: your S3 bucket name
+# - S3_PREFIX: prefix/folder in bucket (default: kirocrew-sync)
+# - AWS_PROFILE: AWS CLI profile name (default: default)
+
+# Rsync settings (edit backends/rsync.sh)
+# - RSYNC_HOST: user@hostname
+# - RSYNC_PATH: remote directory path

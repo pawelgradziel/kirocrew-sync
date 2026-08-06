@@ -1,0 +1,33 @@
+# Credentials and tokens (NEVER commit these!)
+*.conf
+*.credentials
+*.token
+*.key
+.env
+.env.*
+
+# Backend configuration (may contain credentials)
+config.sh
+
+# Local machine-specific files
+.machine_id
+
+# Temporary files
+*.tmp
+*.lock
+temp/
+tmp/
+
+# Backup files
+*.bak
+*~
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
