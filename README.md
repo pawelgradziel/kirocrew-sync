@@ -30,9 +30,8 @@ The following KiroCrew data is included in sync:
 
 ### Prerequisites
 
-Install the storage backend tools you plan to use:
+The default backend is Google Drive, which needs [rclone](https://rclone.org/):
 
-**For Google Drive backend:**
 ```bash
 # macOS
 brew install rclone
@@ -41,24 +40,7 @@ brew install rclone
 curl https://rclone.org/install.sh | sudo bash
 ```
 
-**For S3 backend:**
-```bash
-# macOS
-brew install awscli
-
-# Linux
-pip install awscli
-```
-
-**For rsync backend:**
-```bash
-# macOS
-brew install rsync
-
-# Linux (usually pre-installed)
-sudo apt install rsync  # Debian/Ubuntu
-sudo yum install rsync  # RHEL/CentOS
-```
+Other backends need their own tools — see [Storage Backends](#storage-backends).
 
 ### Setup
 
@@ -73,13 +55,23 @@ sudo yum install rsync  # RHEL/CentOS
    ./kirocrew-sync.sh init
    ```
 
-3. **Configure your storage backend** (see sections below)
+3. **Configure your storage backend** — Google Drive is set up below; for the
+   others follow the linked pages in [Storage Backends](#storage-backends)
 
 ## Storage Backends
 
-### Google Drive (Recommended)
+| Backend | `SYNC_BACKEND` | Needs | Setup |
+| --- | --- | --- | --- |
+| **Google Drive** (default, recommended) | `gdrive` | `rclone` | [below](#google-drive-default) |
+| AWS S3 | `s3` | `awscli` | [docs/backends/s3.md](docs/backends/s3.md) |
+| Rsync (direct host or NAS) | `rsync` | `rsync`, SSH access | [docs/backends/rsync.md](docs/backends/rsync.md) |
+| Your own | any | whatever you script | [docs/backends/custom.md](docs/backends/custom.md) |
 
-Uses [rclone](https://rclone.org/) to sync with Google Drive.
+### Google Drive (Default)
+
+Uses [rclone](https://rclone.org/) to sync with Google Drive. This is what
+`SYNC_BACKEND` defaults to, so nothing else needs configuring once the steps
+below are done.
 
 #### Setup Instructions
 
@@ -127,78 +119,12 @@ Uses [rclone](https://rclone.org/) to sync with Google Drive.
 
 **Security Note:** Your OAuth tokens are stored in `~/.config/rclone/rclone.conf` and are automatically excluded from git commits.
 
-### AWS S3
+### Other Backends
 
-Uses AWS CLI to sync with S3 bucket.
-
-#### Setup Instructions
-
-1. **Install and configure AWS CLI:**
-   ```bash
-   aws configure
-   ```
-   Enter your AWS Access Key ID, Secret Access Key, and default region.
-
-2. **Create an S3 bucket:**
-   ```bash
-   aws s3 mb s3://your-kirocrew-sync-bucket
-   ```
-
-3. **Enable versioning (recommended):**
-   ```bash
-   aws s3api put-bucket-versioning \
-     --bucket your-kirocrew-sync-bucket \
-     --versioning-configuration Status=Enabled
-   ```
-
-4. **Edit the S3 backend configuration:**
-   ```bash
-   nano backends/s3.sh
-   ```
-   Update:
-   ```bash
-   S3_BUCKET="your-kirocrew-sync-bucket"
-   AWS_PROFILE="default"  # or your profile name
-   ```
-
-5. **Set backend to S3:**
-   ```bash
-   export SYNC_BACKEND=s3
-   ./kirocrew-sync.sh push
-   ```
-
-### Rsync (Direct Host)
-
-Sync directly to a remote server or NAS via SSH.
-
-#### Setup Instructions
-
-1. **Set up SSH key authentication:**
-   ```bash
-   ssh-keygen -t ed25519
-   ssh-copy-id user@your-remote-host
-   ```
-
-2. **Create remote directory:**
-   ```bash
-   ssh user@your-remote-host 'mkdir -p /path/to/kirocrew-sync'
-   ```
-
-3. **Edit the rsync backend configuration:**
-   ```bash
-   nano backends/rsync.sh
-   ```
-   Update:
-   ```bash
-   RSYNC_HOST="user@your-remote-host"
-   RSYNC_PATH="/path/to/kirocrew-sync"
-   ```
-
-4. **Set backend to rsync:**
-   ```bash
-   export SYNC_BACKEND=rsync
-   ./kirocrew-sync.sh push
-   ```
+Prefer somewhere else? Set up [AWS S3](docs/backends/s3.md), sync straight to a
+machine you own with [rsync](docs/backends/rsync.md), or
+[write your own](docs/backends/custom.md) — a backend is one bash file with
+three functions.
 
 ## Usage
 
@@ -247,7 +173,7 @@ export SYNC_BACKEND="gdrive"  # or s3, rsync
 ```bash
 cd kirocrew-sync
 ./kirocrew-sync.sh init
-# Configure your backend (see sections above)
+# Configure your backend (see Storage Backends above)
 ./kirocrew-sync.sh push
 ```
 
@@ -419,9 +345,8 @@ folder really is gone and the source should be removed in KiroCrew.
 Sources marked `⚠ outside $HOME and unmapped` still work here but will break on
 the next machine. Give them a name in the path map before pushing.
 
-### Backend-specific issues
+### Google Drive connection problems
 
-**Google Drive:**
 ```bash
 # Re-authenticate
 rclone config reconnect kirocrew-gdrive
@@ -430,52 +355,9 @@ rclone config reconnect kirocrew-gdrive
 rclone lsd kirocrew-gdrive:
 ```
 
-**S3:**
-```bash
-# Check AWS credentials
-aws sts get-caller-identity
-
-# List bucket contents
-aws s3 ls s3://your-bucket/kirocrew-sync/
-```
-
-**Rsync:**
-```bash
-# Test SSH connection
-ssh user@remote-host
-
-# Check remote directory
-ssh user@remote-host 'ls -la /path/to/kirocrew-sync'
-```
-
-## Creating Custom Backends
-
-To add a new storage backend:
-
-1. Create `backends/your-backend.sh`
-2. Implement these functions:
-   ```bash
-   backend_push() {
-       local bundle_dir="$1"
-       # Upload bundle_dir contents to your storage
-   }
-
-   backend_pull() {
-       local bundle_dir="$1"
-       # Download from your storage to bundle_dir
-   }
-
-   backend_status() {
-       # Show backend status and configuration
-   }
-   ```
-
-3. Use it:
-   ```bash
-   SYNC_BACKEND=your-backend ./kirocrew-sync.sh push
-   ```
-
-See existing backends for examples.
+For the other backends, see the troubleshooting section of
+[S3](docs/backends/s3.md#troubleshooting) or
+[rsync](docs/backends/rsync.md#troubleshooting).
 
 ## Tests
 
@@ -501,7 +383,8 @@ storage and touch nothing outside a temporary directory.
 
 Contributions welcome! Areas for improvement:
 
-- Additional backends (Dropbox, OneDrive, WebDAV)
+- Additional backends (Dropbox, OneDrive, WebDAV) — see
+  [docs/backends/custom.md](docs/backends/custom.md)
 - Conflict detection and resolution
 - Incremental sync (only changed files)
 - Compression before upload
