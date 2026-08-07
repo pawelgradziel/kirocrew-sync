@@ -66,9 +66,7 @@ rclone config  # Use the SAME settings as above
 ./kirocrew-sync.sh sync
 ```
 
-## Done!
-
-## Step 5: Check your knowledge sources
+## Step 6: Check your knowledge sources
 
 ```bash
 ./kirocrew-sync.sh paths
@@ -80,6 +78,8 @@ directory travels automatically (`~/code/docs` works on both). Folders outside
 `$HOME`, or repos kept under different subdirectories on each machine, need one
 line per machine in `~/.kiro/crew/path_map.conf` — see
 [README.md](README.md#knowledge-paths-across-machines).
+
+## Done!
 
 ## Daily Usage
 
