@@ -246,6 +246,13 @@ avoids it.
   With no timestamp available, ties are broken by canonical JSON comparison.
   It converges and it is logged, but the winner is arbitrary.
 - **Schema drift blocks sync** rather than migrating. Upgrade both machines.
+  Migrating instead would require the schema's owner; see *Alternatives
+  considered*.
+- **No seeding primitive.** `init` scaffolds config; it cannot pull a first copy
+  from a machine that already has good data. Both recovery paths named above —
+  re-seeding after the wire-format change, and after the third-machine push race
+  — currently depend on one existing. Proposed follow-up under *Alternatives
+  considered*.
 - **`folder_file_state.mtime` is machine-specific** and travels anyway. It is
   advisory scan state, so a stale value costs at most one re-scan.
 
@@ -258,6 +265,77 @@ avoids it.
 | Operation log / CRDT (Option 3) | Deferred. Needs KiroCrew core changes. Row-level LWW plus tombstones already provides the convergence property without them. |
 | Store base as a second copy of each `.db` | Rejected. Doubles storage of the largest artifacts and still needs a row-level differ. |
 | Sync a bare git repo directory through the backend | Rejected. Concurrent writers corrupt git repositories over cloud-sync folders. |
+| Snapshot tarball + `restore --mode merge`, as a KiroCrew subcommand | Rejected as a sync mechanism, right about two things. A snapshot carries state without ancestry, so "merge" has no definition. Detailed below. |
+
+### Snapshot + restore as a KiroCrew subcommand
+
+A later proposal moved sync inside the application itself:
+
+```bash
+laptop$  kirocrew snapshot --components memory,artifacts
+laptop$  scp ~/.kiro/crew/snapshots/latest.tar.gz desktop:~/
+desktop$ kirocrew restore ~/latest.tar.gz --mode merge
+```
+
+**`--mode merge` cannot be defined.** A snapshot is a state; a merge needs two
+states *and their common ancestor*. Restore sees local `L` and snapshot `R`, and
+cannot tell these apart:
+
+| Observation | Could mean | Correct action |
+|---|---|---|
+| in `L`, absent from `R` | this machine added it | keep |
+| in `L`, absent from `R` | the other machine deleted it | delete |
+| in both, differing | one side edited | take that side |
+| in both, differing | both sides edited | conflict |
+
+Nothing in the tarball resolves the ambiguity, so `merge` collapses to either
+union — where deletes never propagate and tombstones only accumulate — or
+last-writer-wins on `updated_at`, which hands back the clock-skew independence
+that §2 and §4 exist to buy. Persisting the previous snapshot to diff against
+would resolve it, and would rebuild the `base_manifest.json` that §2 rejects.
+
+Being file-granular costs three further things:
+
+- **Credentials.** `--components` includes or excludes whole files. The secrets
+  found here are *inside* files worth syncing — `config.json` holds `bot_token`
+  beside real settings — so component scoping cannot reach them. §6 strips per
+  JSON leaf instead.
+- **Path portability.** A tarball carries `sources.uri` as this machine's
+  absolute paths. §5's deduplication depends on encoding *before* row identity is
+  computed, which no file-level restore can do.
+- **The empty-database bug returns.** A tarball of the directory ships the 4 KB
+  `memory.db` shell and leaves 2.5 MB in the `-wal` — unless snapshot exports
+  through SQLite, which running inside the application does make easy.
+
+`scp` also bypasses the backend interface, requiring both machines reachable at
+once.
+
+**What the proposal is right about**, both points against the design chosen here:
+
+- **A first-party command versions with the schema.** This tool is outside-in: it
+  infers merge policy from column names and refuses on schema drift because it
+  cannot migrate. A command shipped with KiroCrew would carry KiroCrew's own
+  migrations, and "schema drift blocks sync" would stop being a limitation and
+  become a handled case. This is the strongest argument for eventually moving
+  sync into KiroCrew core — where the deferred operation log needs to go anyway.
+- **There is no seeding primitive.** `init` scaffolds config only. Re-seeding is
+  named as the recovery path twice above — after the wire-format change, and
+  after the third-machine push race — with no command behind it. Component
+  scoping chosen at call time is likewise something a static allowlist does not
+  give.
+
+Both are worth having as a follow-up, built on the existing pipeline rather than
+beside it:
+
+```
+kirocrew-sync.sh export --components memory,artifacts -o snap.tar.gz
+kirocrew-sync.sh import snap.tar.gz --mode replace
+```
+
+`export` is `unpack` plus `tar`, with the §6 gates already applied on the way
+out. `import --mode replace` is the missing seed. There is deliberately **no
+`--mode merge`**: merging is what `sync` does, with a base, and offering a
+baseless merge beside it would be offering a subtly broken one.
 
 ## Verification
 
