@@ -12,6 +12,37 @@ since then, and combines both.
 ./kirocrew-sync.sh sync
 ```
 
+## What is it for?
+
+**Primarily: keeping one person's KiroCrew data consistent across their own
+computers.** Laptop, desktop, work machine — you sit down at whichever one is
+in front of you, run `sync`, and your chat history, knowledge base, artifacts
+and learned lessons are there, merged rather than overwritten. That is the case
+it is designed and tested for. It is not limited to two machines: each machine
+publishes its own state and merges every other machine's.
+
+**A small team can also share one knowledge base with it** — but read this
+first. Nothing in the merge is single-user; three machines converge
+byte-for-byte just as two do. What is single-user is *what* travels:
+
+- **Everything is shared, including personal state.** One person's
+  `config.json` settings land on everyone else's machine, and every chat
+  transcript is copied to every machine. There is no per-user scoping and no
+  way to mark a row private.
+- **No access control.** Anyone who can read the storage backend gets the whole
+  knowledge base, all memory, and all transcripts.
+- **Credentials are the exception.** API tokens and secret-shaped JSON values
+  are stripped before publishing and never cross machines.
+- **Concurrent publishing races.** A machine that publishes between another
+  machine's pull and push has its bundle removed from the remote. Nothing is
+  lost — it is restored on that machine's next sync — but the window is hit
+  more often the more people are syncing.
+
+So a small, trusted team that genuinely wants *one shared brain* can use it, and
+should expect exactly that rather than per-person workspaces. If you need
+private sessions, per-user permissions, or many simultaneous writers, this is
+the wrong tool.
+
 ## Why three-way sync matters here
 
 A one-directional copy forces you to remember which laptop has newer data, and
@@ -268,7 +299,7 @@ SYNC_BACKEND=rsync ./kirocrew-sync.sh sync
 
 Or edit `config.sh` to set the backend for every run:
 ```bash
-export SYNC_BACKEND="gdrive"  # or s3, rsync
+export SYNC_BACKEND="gdrive"  # or s3, rsync, local
 ```
 
 The environment wins over `config.sh`, so the one-off form above overrides the
@@ -443,6 +474,9 @@ wrong directory.
   versions instead of blending incompatible schemas.
 - **Embedding gate**: refuses to mix vectors from different embedding models,
   which would otherwise degrade semantic search with no visible error.
+- **Quarantine, not deadlock**: a machine either gate rejects is skipped, while
+  every other machine still syncs. It is re-checked on each sync and rejoins on
+  its own once it catches up, so one lagging laptop never blocks the rest.
 - **Credential allowlist**: only explicitly listed paths are ever published.
 - **Full history**: every sync is a git commit in `~/.kiro/crew/.sync/repo`,
   so any previous state can be recovered.
@@ -455,12 +489,18 @@ Quit the KiroCrew app, then re-run. To look around without stopping it:
 ./kirocrew-sync.sh sync --dry-run
 ```
 
-### "schema drift" or "embedding space mismatch"
-The two machines are on different KiroCrew versions or different embedding
-models. Bring them into line, then sync. To override deliberately:
+### "N machine(s) quarantined"
+That machine is on a different KiroCrew version or embedding model, so its
+changes were skipped. Everything else still synced, and `sync` exits `3` to
+say so. Nothing to do here — bring that machine up to date and the next
+ordinary sync merges it automatically. `status` lists who is quarantined.
+
+To merge it now anyway, knowing the schemas or vectors differ:
 ```bash
 ./kirocrew-sync.sh sync --force
 ```
+`--force` is not scoped to one machine: it drops the compatibility check for
+every machine and every preflight gate at once.
 
 ### A sync stopped on conflicts
 ```bash

@@ -157,7 +157,7 @@ def _find_secret_leaves(value, path=""):
     return found
 
 
-def run_all(kirocrew_dir, repo_dir, before_pack=True):
+def run_all(kirocrew_dir, repo_dir):
     results = []
     results.extend(check_schema_drift(kirocrew_dir, repo_dir))
     results.extend(check_embedding_space(kirocrew_dir, repo_dir))

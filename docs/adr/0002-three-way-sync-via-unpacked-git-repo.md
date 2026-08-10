@@ -190,6 +190,19 @@ cross-machine meaning.
   silently, with no error and no visible corruption. This check must run
   pre-merge, because the merge collapses each row to a single winner and the
   difference is gone afterwards.
+
+Both gates are scoped to the machine that fails them. A rejected machine is
+*quarantined*: its ref is skipped, every other machine still merges, packs and
+publishes, and `sync` exits 3 to report the partial result. Quarantine is the
+whole remedy — nothing was merged, so nothing local is at risk, and the check
+re-runs on the next sync, so the machine rejoins by itself once it catches up.
+
+Aborting the sync instead, as this originally did, bought no safety and cost
+availability: one machine on an old KiroCrew version stopped every other pair
+from syncing. Worse, the advertised escape hatch made it dangerous — `--force`
+is not per-machine, so the only documented way to unblock A↔B also merged the
+incompatible data and skipped the credential gate. The safe action must not be
+the one that requires the blunt override.
 - **Referential integrity** — deletes run children-first, inserts parents-first
   in foreign-key topological order, followed by `PRAGMA foreign_key_check`.
 - **Credentials** — an explicit allowlist decides what leaves the machine, with
@@ -245,9 +258,9 @@ avoids it.
 - **`config.json` conflicts resolve deterministically, not intelligently.**
   With no timestamp available, ties are broken by canonical JSON comparison.
   It converges and it is logged, but the winner is arbitrary.
-- **Schema drift blocks sync** rather than migrating. Upgrade both machines.
-  Migrating instead would require the schema's owner; see *Alternatives
-  considered*.
+- **Schema drift quarantines a machine** rather than migrating. The rest keep
+  syncing, but that machine contributes nothing until it is upgraded. Migrating
+  instead would require the schema's owner; see *Alternatives considered*.
 - **No seeding primitive.** `init` scaffolds config; it cannot pull a first copy
   from a machine that already has good data. Both recovery paths named above —
   re-seeding after the wire-format change, and after the third-machine push race
@@ -340,11 +353,19 @@ baseless merge beside it would be offering a subtly broken one.
 ## Verification
 
 `tests/run_tests.sh` runs two simulated machines against a local-directory
-backend: 45 assertions across 11 scenarios covering disjoint edits, same-row
+backend: 59 assertions across 12 scenarios covering disjoint edits, same-row
 conflicts, delete-vs-edit, delete propagation, both override strategies,
 machine-local state isolation, credential containment, structural config merge,
 session union, FTS rebuild over rows received from the other machine, event-log
-renumbering, convergence under repeated idle syncs, embedding mismatch refusal,
-and dry-run safety. `tests/test_sync_paths.sh` covers path portability through
+renumbering, convergence under repeated idle syncs, quarantine of a mismatched
+machine and its self-healing once the models match, and dry-run safety.
+
+Two of those assertions exist because the suite was previously blind to their
+failure. Exit codes are asserted, because the EXIT trap referenced an
+out-of-scope local and every successful sync exited 1 unnoticed. And the
+credential scan unbundles before grepping, because grepping the bundles
+directly searched zlib-compressed packfiles — it would have passed whether or
+not the secret was published. The scan now also asserts it can see known
+content, so it cannot go vacuously green again. `tests/test_sync_paths.sh` covers path portability through
 the new pipeline, and the ADR 0001 suites (`test_portable_paths.sh`,
 `test_config_precedence.sh`) still pass unchanged.

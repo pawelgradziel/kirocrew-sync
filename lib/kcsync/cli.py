@@ -3,11 +3,15 @@ module owns everything that touches KiroCrew's data.
 """
 
 import argparse
+import collections
+import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import FORMAT_VERSION, gates, merge
+from . import paths as pathmod
 from . import policy as pol
 from .canon import BlobStore
 from . import dbio, files
@@ -42,16 +46,15 @@ def cmd_unpack(args):
         policies = dbio.unpack_db(db_path, out, db_name, blobs)
         for stale in dbio.stale_jsonl(out, policies):
             stale.unlink()
-        exported = sum(1 for p in policies.values()
-                       if p.mode not in (pol.SKIP, pol.LOCAL))
+        exported = sum(1 for p in policies.values() if pol.is_exported(p))
         skipped = [n for n, p in policies.items() if p.mode == pol.LOCAL]
         log("  unpacked %s: %d tables" % (db_name, exported))
         if skipped:
             log("    machine-local, not synced: %s" % ", ".join(sorted(skipped)))
 
-    written, redacted = files.unpack_files(kirocrew_dir, files_dir, log)
+    written, redacted, veto = files.unpack_files(kirocrew_dir, files_dir, log)
     log("  unpacked %d files" % len(written))
-    for rel in files.vetoed(kirocrew_dir)[:10]:
+    for rel in veto[:10]:
         log("    excluded by a credential rule: %s" % rel)
     if redacted:
         log("    redacted %d credential field(s) before sync" % len(redacted))
@@ -107,7 +110,7 @@ def cmd_pack(args):
                 continue
             stats = dbio.pack_db(db_path, source, db_name, blobs,
                                  dry_run=args.dry_run, log=log)
-            log("  packed %s: %d rows applied, %d deleted"
+            log("  packed %s: %d rows written, %d deleted"
                 % (db_name, stats["applied"], stats["deleted"]))
             if stats["orphans"]:
                 log("  WARN: %d orphaned row(s) in %s after merge"
@@ -200,27 +203,68 @@ def cmd_doctor(args):
         if (kirocrew_dir / name).exists():
             log("  %-10s derived index, excluded from sync" % name)
 
-    syncable = list(files.iter_syncable(kirocrew_dir))
+    syncable, veto, skipped_big = files.scan_tree(kirocrew_dir)
     total = sum((kirocrew_dir / r).stat().st_size for r in syncable)
     log("  %d files allowlisted (%.1f KB)" % (len(syncable), total / 1024.0))
 
-    for rel in files.vetoed(kirocrew_dir)[:10]:
+    for rel in veto[:10]:
         log("  excluded by a credential rule: %s" % rel)
 
-    skipped_big = []
-    for path in kirocrew_dir.glob("*"):
-        if path.is_file() and path.stat().st_size > 1024 * 1024:
-            rel = path.relative_to(kirocrew_dir)
-            if not files.is_allowed(rel):
-                skipped_big.append((rel, path.stat().st_size))
     for rel, size in sorted(skipped_big, key=lambda x: -x[1])[:5]:
         log("  excluded %s (%.1f MB)" % (rel, size / (1024.0 * 1024.0)))
 
     return 1 if problems else 0
 
 
+def cmd_conflicts(args):
+    """Summarize an automatic-resolution conflict log (JSONL)."""
+    log_path = Path(args.log)
+    if not log_path.is_file() or log_path.stat().st_size == 0:
+        return 0
+    counts = collections.Counter()
+    examples = {}
+    with open(log_path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            entry = json.loads(line)
+            key = (entry.get("table"), entry.get("kind"), entry.get("resolution"))
+            counts[key] += 1
+            examples.setdefault(key, entry.get("key", ""))
+    for (table, kind, resolution), count in counts.most_common(10):
+        sample = str(examples[(table, kind, resolution)])[:60]
+        print("    %-24s %-14s %-12s x%d  e.g. %s"
+              % (table, kind, resolution, count, sample))
+    return 0
+
+
+def cmd_paths(args):
+    """Report knowledge source path health.
+
+    Exit codes are three-way so the caller can tell "all good" from "nothing
+    to check": 0 all paths resolve, 1 some need attention, 2 no database.
+    """
+    pp = pathmod.portable_paths
+    if pp is None:
+        sys.stderr.write("  path translation is unavailable on this machine\n")
+        return 2
+
+    db = Path(args.kirocrew_dir) / pol.DATABASES["knowledge"]
+    if not db.is_file():
+        sys.stderr.write("  no knowledge database at %s\n" % db)
+        return 2
+
+    map_file = os.environ.get("KIROCREW_PATH_MAP")
+    try:
+        mappings = pp.load_mappings(map_file)
+    except (pp.PathMapError, OSError) as exc:
+        sys.stderr.write("  path map unusable: %s\n" % exc)
+        return 1
+    return pp.report(db, mappings)
+
+
 def _timestamp():
-    from datetime import datetime, timezone
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
@@ -271,6 +315,16 @@ def build_parser():
     p = with_common(sub.add_parser("doctor", help="inspect local state"),
                     need_repo=False)
     p.set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser("conflicts",
+                       help="summarize an automatic conflict log (JSONL)")
+    p.add_argument("log", help="path to conflicts.jsonl")
+    p.set_defaults(func=cmd_conflicts)
+
+    p = with_common(sub.add_parser(
+        "paths", help="check knowledge source path portability"),
+                    need_repo=False)
+    p.set_defaults(func=cmd_paths)
 
     return parser
 

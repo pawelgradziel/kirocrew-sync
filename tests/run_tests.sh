@@ -71,6 +71,27 @@ sync_machine() {
 dump()       { $FIXTURE dump "$WORK/$1"; }
 local_only() { $FIXTURE local-only "$WORK/$1"; }
 
+# Everything that actually reached the backend, as plain text.
+#
+# Grepping the bundle files directly proves nothing: a bundle is a packfile,
+# so every path and blob inside it is zlib-compressed and `strings` finds no
+# plaintext whether the secret is in there or not. Unpack them instead and
+# dump every object.
+published_dump() {
+    local tmp bundle
+    tmp="$(mktemp -d)"
+    git init -q "$tmp"
+    for bundle in "$WORK"/remote/bundles/*.bundle; do
+        [ -f "$bundle" ] || continue
+        git -C "$tmp" fetch -q "$bundle" \
+            "refs/heads/*:refs/remotes/$(basename "$bundle" .bundle)/*" 2>/dev/null || true
+    done
+    git -C "$tmp" rev-list --all --objects 2>/dev/null | awk 'NF > 1 {print $2}' | sort -u
+    # Embeddings are binary; drop NULs so the text stays greppable.
+    git -C "$tmp" cat-file --batch-all-objects --batch 2>/dev/null | tr -d '\000'
+    rm -rf "$tmp"
+}
+
 fresh_pair() {
     rm -rf "$WORK/remote"
     setup_machine a
@@ -184,10 +205,26 @@ assert_contains     "B received A's folder state"   "$LB" "/machine/a/local/path
 assert_contains     "A kept its own bot token"      "$LA" "SECRET-a"
 assert_contains     "B kept its own bot token"      "$LB" "SECRET-b"
 
-REMOTE_SCAN="$(find "$WORK/remote" -type f -exec cat {} + 2>/dev/null | strings 2>/dev/null || true)"
+REMOTE_SCAN="$(published_dump)"
+# A scan that comes back empty makes every assertion below pass for free --
+# which is exactly what the old `strings`-over-packfiles scan did. Prove the
+# scan can see published content before trusting it to prove an absence.
+assert_contains     "published scan is non-vacuous"  "$REMOTE_SCAN" "chat-a.jsonl"
 assert_not_contains "no bot token in published data" "$REMOTE_SCAN" "SECRET-a"
 assert_not_contains "no mcp token in published data" "$REMOTE_SCAN" "live-token"
 assert_not_contains "no local secret published"      "$REMOTE_SCAN" "topsecret"
+assert_not_contains "no nested .git published"       "$REMOTE_SCAN" "ghp-gitsecret"
+# artifacts/** is recursive, so a repo checked out inside it is kept out only
+# by the "**/.git/**" denylist rule. Assert at the staging tree, not the
+# bundle: git refuses to track any path with a .git component, so a broken
+# denylist still copies the credential into .sync/repo and looks clean
+# downstream. The staging tree is where the allowlist decision is visible.
+assert_eq "nested .git never reaches the sync repo" \
+    "$([ -e "$WORK/a/.sync/repo/files/artifacts/cloned-repo/.git" ] \
+        && echo present || echo absent)" "absent"
+# ...while ordinary content in the same directory must still travel.
+assert_contains     "artifact beside .git still synced" \
+    "$(ls "$WORK/b/artifacts/cloned-repo" 2>&1)" "notes-a.md"
 
 head_ "Scenario 7: config.json merges key by key"
 fresh_pair
@@ -236,25 +273,48 @@ head_ "Scenario 9: repeated sync with no changes is a no-op (convergence)"
 BEFORE="$(dump a)"
 sync_machine a sync > /dev/null
 sync_machine b sync > /dev/null
-sync_machine a sync > /dev/null
+sync_machine a sync > /dev/null; RC=$?
 AFTER="$(dump a)"
 assert_eq "idle syncs change nothing" "$BEFORE" "$AFTER"
+
+# A sync that worked must say so. The EXIT trap used to reference a variable
+# that had already gone out of scope, so every successful run exited 1.
+assert_eq "successful sync exits 0" "$RC" "0"
+sync_machine a push > /dev/null; assert_eq "successful push exits 0" "$?" "0"
 
 REPO="$WORK/a/.sync/repo"
 NEW_COMMITS="$(git -C "$REPO" log --oneline "$(git -C "$REPO" rev-list -n1 --skip=0 main)" 2>/dev/null | wc -l)"
 CLEAN="$(git -C "$REPO" status --porcelain | wc -l | tr -d ' ')"
 assert_eq "working tree clean after idle sync" "$CLEAN" "0"
 
-head_ "Scenario 10: mismatched embedding models are refused"
+head_ "Scenario 10: a mismatched machine is quarantined, not fatal"
 rm -rf "$WORK/remote"
 setup_machine a sig-model-one
 setup_machine b sig-model-two
+$FIXTURE set-lesson "$WORK/a" lesson.only-on-a "from A" --ts 2026-03-01T10:00:00+00:00
 sync_machine a sync > /dev/null 2>&1
-OUT="$(sync_machine b sync 2>&1)"
-assert_contains "embedding mismatch detected" "$OUT" "embedding space mismatch"
-assert_contains "sync refused to merge"                "$OUT" "incompatible machine"
 
-head_ "Scenario 11: dry run writes nothing"
+OUT="$(sync_machine b sync 2>&1)"; RC=$?
+assert_contains "embedding mismatch detected" "$OUT" "embedding space mismatch"
+assert_contains "machine was quarantined"     "$OUT" "quarantined"
+assert_eq       "exit code says partial sync" "$RC" "3"
+# The quarantine has to actually hold: none of A's rows may be merged.
+assert_not_contains "quarantined data stayed out" "$(dump b)" "lesson.only-on-a"
+# ...but B must still finish its own sync rather than being held hostage.
+assert_contains "B still published its own state" \
+    "$(ls "$WORK/remote/bundles" 2>&1)" "machine-b.bundle"
+assert_contains "quarantine is visible in status" "$(sync_machine b status 2>&1)" "Quarantined"
+
+head_ "Scenario 11: quarantine lifts by itself once the models match"
+# No --force, no manual step: B moves onto A's embedding model, and the next
+# ordinary sync merges the machine that was quarantined a moment ago.
+$FIXTURE set-embedding-sig "$WORK/b" sig-model-one
+OUT="$(sync_machine b sync 2>&1)"; RC=$?
+assert_eq       "sync now succeeds"          "$RC" "0"
+assert_not_contains "nothing left quarantined" "$OUT" "quarantined"
+assert_contains "previously quarantined data arrived" "$(dump b)" "lesson.only-on-a"
+
+head_ "Scenario 12: dry run writes nothing"
 fresh_pair
 $FIXTURE set-lesson "$WORK/a" lesson.dry "dry" --ts 2026-03-01T10:00:00+00:00
 sync_machine a sync > /dev/null

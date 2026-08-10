@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 from . import policy as pol
 from .canon import dumps, dumps_pretty, row_identity
+from .dbio import read_jsonl
 
 AUTO = "auto"
 LOCAL_WINS = "local-wins"
@@ -83,7 +84,7 @@ def merge_table(base, ours, theirs, table_policy, identity, strategy=AUTO,
     conflicts = []
     merged = {}
 
-    for key in set(base) | set(ours) | set(theirs):
+    for key in sorted(set(base) | set(ours) | set(theirs)):
         b, o, t = base.get(key), ours.get(key), theirs.get(key)
         bj = dumps(b) if b is not None else None
         oj = dumps(o) if o is not None else None
@@ -159,7 +160,7 @@ def merge_json(base, ours, theirs, strategy=AUTO, path="", conflicts=None):
     if isinstance(ours, dict) and isinstance(theirs, dict):
         base_d = base if isinstance(base, dict) else {}
         out = {}
-        for key in set(ours) | set(theirs):
+        for key in sorted(set(ours) | set(theirs)):
             here = path + "." + key if path else key
             if key not in ours:
                 if key in base_d and dumps(base_d[key]) == dumps(theirs[key]):
@@ -193,7 +194,6 @@ def merge_json(base, ours, theirs, strategy=AUTO, path="", conflicts=None):
 # --------------------------------------------------------------------------
 
 def _read_jsonl_or_die(path, label):
-    from .dbio import read_jsonl
     try:
         return read_jsonl(path)
     except ValueError as exc:

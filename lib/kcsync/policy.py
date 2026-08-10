@@ -5,7 +5,7 @@ sync sensibly, with explicit overrides for the tables whose semantics the
 schema alone does not reveal (append-only logs, machine-local scratch state).
 """
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 
 # Merge modes
 SKIP = "skip"      # derived data - never exported, rebuilt locally after pack
@@ -14,7 +14,7 @@ LWW = "lww"        # mutable rows - last writer wins on ts_col
 UNION = "union"    # immutable rows - set union, keyed by identity
 
 
-@dataclass
+@dataclass(frozen=True)
 class TablePolicy:
     mode: str
     ts_col: str = None            # timestamp column used to break LWW ties
@@ -89,7 +89,7 @@ OVERRIDES = {
 _TS_CANDIDATES = ("updated_at", "modified_at", "created_at")
 
 
-def infer(table, columns, pk_columns, is_virtual, is_shadow):
+def infer(columns, pk_columns, is_virtual, is_shadow):
     """Best-effort policy for a table with no explicit override."""
     if is_virtual or is_shadow:
         return TablePolicy(SKIP, note="FTS/virtual table; rebuilt after pack")
@@ -106,8 +106,15 @@ def infer(table, columns, pk_columns, is_virtual, is_shadow):
                        note="inferred: no primary key, row-hash identity")
 
 
-def for_table(db_name, table, columns, pk_columns, is_virtual, is_shadow):
-    override = OVERRIDES.get(db_name, {}).get(table)
+def for_table(db_name, table_info):
+    """Resolve the merge policy for one dbio.TableInfo."""
+    override = OVERRIDES.get(db_name, {}).get(table_info.name)
     if override is not None:
         return override
-    return infer(table, columns, pk_columns, is_virtual, is_shadow)
+    return infer(table_info.columns, table_info.pk_columns,
+                 table_info.is_virtual, table_info.is_shadow)
+
+
+def is_exported(policy):
+    """True when the table is written to the sync repo (not SKIP or LOCAL)."""
+    return policy.mode not in (SKIP, LOCAL)

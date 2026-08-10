@@ -2,7 +2,7 @@
 # KiroCrew Sync Configuration
 # Copy this file to config.sh and customize
 
-# Storage backend: gdrive, s3, rsync, or custom
+# Storage backend: gdrive, s3, rsync, local, or custom
 export SYNC_BACKEND="gdrive"
 
 # KiroCrew data directory (override if non-standard)
@@ -32,3 +32,6 @@ export KIROCREW_PATH_MAP="$KIROCREW_DIR/path_map.conf"
 # Rsync settings (edit backends/rsync.sh)
 # - RSYNC_HOST: user@hostname
 # - RSYNC_PATH: remote directory path
+
+# Local directory settings (edit backends/local.sh) — Dropbox, Syncthing, NAS, USB
+# - LOCAL_SYNC_DIR: shared folder path (default: $HOME/Dropbox/KiroCrew-Sync)

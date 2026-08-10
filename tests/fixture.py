@@ -136,6 +136,16 @@ def cmd_create(args):
         json.dumps({"mcpServers": {"x": {"env": {"API_KEY": "live-token"}}}}),
         encoding="utf-8")
     (root / ".local_secret").write_text("topsecret", encoding="utf-8")
+    # A checked-out repo nested inside an allowlisted tree. artifacts/** is
+    # recursive, so only the denylist keeps .git out -- and .git/config
+    # routinely carries a credential in the remote URL.
+    git_dir = root / "artifacts" / "cloned-repo" / ".git"
+    git_dir.mkdir(parents=True, exist_ok=True)
+    (git_dir / "config").write_text(
+        "[remote \"origin\"]\n\turl = https://x-token:ghp-gitsecret@example.com/r.git\n",
+        encoding="utf-8")
+    (root / "artifacts" / "cloned-repo" / ("notes-%s.md" % args.name)).write_text(
+        "ordinary artifact content from %s\n" % args.name, encoding="utf-8")
     print("created %s" % root)
     return 0
 
@@ -173,6 +183,16 @@ def cmd_add_item(args):
         "VALUES (?,?,?,'design_doc','src-1',?,?,?,?,'sig-shared')",
         [args.id, args.title, "body of " + args.id, "hash-" + args.id,
          args.ts, args.ts, bytes([len(args.id) % 256]) * 4096])
+    conn.commit()
+    conn.close()
+    return 0
+
+
+def cmd_set_embedding_sig(args):
+    """Move a machine onto a different embedding model, as an upgrade would."""
+    conn = connect(Path(args.dir) / "memory.db")
+    conn.execute("UPDATE memory_meta SET value=? WHERE key='embedding_space_sig'",
+                 [args.sig])
     conn.commit()
     conn.close()
     return 0
@@ -266,6 +286,10 @@ def main():
     p.add_argument("dir"); p.add_argument("id"); p.add_argument("title")
     p.add_argument("--ts", default="2026-02-01T00:00:00+00:00")
     p.set_defaults(func=cmd_add_item)
+
+    p = sub.add_parser("set-embedding-sig")
+    p.add_argument("dir"); p.add_argument("sig")
+    p.set_defaults(func=cmd_set_embedding_sig)
 
     p = sub.add_parser("set-config")
     p.add_argument("dir"); p.add_argument("key"); p.add_argument("value")

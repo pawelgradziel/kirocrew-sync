@@ -9,6 +9,7 @@ main .db file can be a 4 KB shell with megabytes of real data sitting in the
 correct; it is also why -wal and -shm never need to cross the wire.
 """
 
+import json
 import shutil
 import sqlite3
 from pathlib import Path
@@ -93,9 +94,8 @@ def schema_text(conn, db_name):
     lines = []
     for name in sorted(tables):
         t = tables[name]
-        p = pol.for_table(db_name, name, t.columns, t.pk_columns,
-                          t.is_virtual, t.is_shadow)
-        if p.mode in (pol.SKIP, pol.LOCAL) or not t.sql:
+        p = pol.for_table(db_name, t)
+        if not pol.is_exported(p) or not t.sql:
             continue
         lines.append(normalize_ddl(t.sql))
     return sorted(lines)
@@ -153,10 +153,9 @@ def unpack_db(db_path, out_dir, db_name, blobs):
 
         for name in sorted(tables):
             t = tables[name]
-            p = pol.for_table(db_name, name, t.columns, t.pk_columns,
-                              t.is_virtual, t.is_shadow)
+            p = pol.for_table(db_name, t)
             policies[name] = p
-            if p.mode in (pol.SKIP, pol.LOCAL):
+            if not pol.is_exported(p):
                 continue
 
             identity = identity_columns(t, p)
@@ -207,8 +206,7 @@ def unpack_db(db_path, out_dir, db_name, blobs):
 
 def stale_jsonl(out_dir, policies):
     """JSONL files in the repo for tables that no longer exist or are excluded."""
-    keep = {name + ".jsonl" for name, p in policies.items()
-            if p.mode not in (pol.SKIP, pol.LOCAL)}
+    keep = {name + ".jsonl" for name, p in policies.items() if pol.is_exported(p)}
     return [p for p in Path(out_dir).glob("*.jsonl") if p.name not in keep]
 
 
@@ -217,7 +215,6 @@ def stale_jsonl(out_dir, policies):
 # --------------------------------------------------------------------------
 
 def read_jsonl(path):
-    import json
     rows = []
     if not Path(path).exists():
         return rows
@@ -259,9 +256,8 @@ def pack_db(db_path, in_dir, db_name, blobs, dry_run=False, log=print):
         tables = inspect(conn)
         syncable = {}
         for name, t in tables.items():
-            p = pol.for_table(db_name, name, t.columns, t.pk_columns,
-                              t.is_virtual, t.is_shadow)
-            if p.mode not in (pol.SKIP, pol.LOCAL):
+            p = pol.for_table(db_name, t)
+            if pol.is_exported(p):
                 syncable[name] = (t, p)
 
         order = [n for n in fk_order(conn, syncable) if n in syncable]
