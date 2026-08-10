@@ -9,6 +9,7 @@ main .db file can be a 4 KB shell with megabytes of real data sitting in the
 correct; it is also why -wal and -shm never need to cross the wire.
 """
 
+import json
 import shutil
 import sqlite3
 from pathlib import Path
@@ -83,7 +84,7 @@ def normalize_ddl(sql):
     return " ".join((sql or "").split()).rstrip(";") + ";"
 
 
-def schema_text(conn, db_name):
+def schema_text(conn, db_name, scope=pol.PERSONAL):
     """Canonical schema for the tables this database actually exports.
 
     unpack and the drift gate must agree exactly on which tables count, or the
@@ -93,9 +94,8 @@ def schema_text(conn, db_name):
     lines = []
     for name in sorted(tables):
         t = tables[name]
-        p = pol.for_table(db_name, name, t.columns, t.pk_columns,
-                          t.is_virtual, t.is_shadow)
-        if p.mode in (pol.SKIP, pol.LOCAL) or not t.sql:
+        p = pol.for_table(db_name, t)
+        if not pol.is_exported(p, scope) or not t.sql:
             continue
         lines.append(normalize_ddl(t.sql))
     return sorted(lines)
@@ -140,7 +140,7 @@ def fk_order(conn, tables):
 # unpack
 # --------------------------------------------------------------------------
 
-def unpack_db(db_path, out_dir, db_name, blobs):
+def unpack_db(db_path, out_dir, db_name, blobs, scope=pol.PERSONAL):
     """Export one database to canonical JSONL. Returns a per-table policy map."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -153,10 +153,9 @@ def unpack_db(db_path, out_dir, db_name, blobs):
 
         for name in sorted(tables):
             t = tables[name]
-            p = pol.for_table(db_name, name, t.columns, t.pk_columns,
-                              t.is_virtual, t.is_shadow)
+            p = pol.for_table(db_name, t)
             policies[name] = p
-            if p.mode in (pol.SKIP, pol.LOCAL):
+            if not pol.is_exported(p, scope):
                 continue
 
             identity = identity_columns(t, p)
@@ -188,7 +187,7 @@ def unpack_db(db_path, out_dir, db_name, blobs):
         # Written as a separate file so a schema change surfaces as its own
         # conflict rather than as noise spread across every table.
         (out_dir / "_schema.sql").write_text(
-            "\n".join(schema_text(conn, db_name)) + "\n", encoding="utf-8")
+            "\n".join(schema_text(conn, db_name, scope)) + "\n", encoding="utf-8")
 
         # The merge driver reads this to learn each table's identity columns,
         # so it must carry the resolved list, not the declared one.
@@ -205,10 +204,10 @@ def unpack_db(db_path, out_dir, db_name, blobs):
         conn.close()
 
 
-def stale_jsonl(out_dir, policies):
+def stale_jsonl(out_dir, policies, scope=pol.PERSONAL):
     """JSONL files in the repo for tables that no longer exist or are excluded."""
     keep = {name + ".jsonl" for name, p in policies.items()
-            if p.mode not in (pol.SKIP, pol.LOCAL)}
+            if pol.is_exported(p, scope)}
     return [p for p in Path(out_dir).glob("*.jsonl") if p.name not in keep]
 
 
@@ -217,7 +216,6 @@ def stale_jsonl(out_dir, policies):
 # --------------------------------------------------------------------------
 
 def read_jsonl(path):
-    import json
     rows = []
     if not Path(path).exists():
         return rows
@@ -249,7 +247,8 @@ def identity_columns(table_info, table_policy):
     return cols or list(table_info.columns)
 
 
-def pack_db(db_path, in_dir, db_name, blobs, dry_run=False, log=print):
+def pack_db(db_path, in_dir, db_name, blobs, dry_run=False, log=print,
+            scope=pol.PERSONAL):
     """Apply canonical JSONL to a live database inside one transaction."""
     in_dir = Path(in_dir)
     conn = connect_rw(db_path)
@@ -259,9 +258,8 @@ def pack_db(db_path, in_dir, db_name, blobs, dry_run=False, log=print):
         tables = inspect(conn)
         syncable = {}
         for name, t in tables.items():
-            p = pol.for_table(db_name, name, t.columns, t.pk_columns,
-                              t.is_virtual, t.is_shadow)
-            if p.mode not in (pol.SKIP, pol.LOCAL):
+            p = pol.for_table(db_name, t)
+            if pol.is_exported(p, scope):
                 syncable[name] = (t, p)
 
         order = [n for n in fk_order(conn, syncable) if n in syncable]

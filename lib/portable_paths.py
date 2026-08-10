@@ -5,11 +5,17 @@ The knowledge database stores filesystem paths verbatim: a folder source added o
 one machine keeps that machine's absolute path forever. Sync the database to a
 second machine with a different layout and every folder source breaks.
 
-This module fixes that at the sync boundary rather than in the database KiroCrew
-actually reads:
+**Sync path (production):** ``kcsync`` applies translation row-by-row via
+``kcsync.paths``, which calls only ``load_mappings``, ``to_portable``, and
+``to_local`` from this module. The live ``knowledge.db`` is never rewritten in
+place during a normal sync.
 
-    push:  local absolute  --encode-->  portable   (rewrites the BUNDLE copy)
-    pull:  portable        --decode-->  local absolute (rewrites the BUNDLE copy)
+**Manual repair CLI:** the ``encode`` / ``decode`` / ``report`` subcommands
+(and the whole-DB ``Rewriter``) remain as an offline tool for fixing a database
+that already holds mixed local/portable paths — e.g. after a partial migration
+or a hand-edited copy. Prefer ``./kirocrew-sync.sh paths`` (report) for
+day-to-day checks; use encode/decode only when you intentionally want to mutate
+a database file.
 
 The live knowledge.db always holds real absolute paths. That is deliberate --
 KiroCrew resolves source URIs with a bare ``Path(uri)`` (see
@@ -366,9 +372,13 @@ def cmd_decode(args: argparse.Namespace, mappings: list[tuple[str, str]]) -> int
     return 0
 
 
-def cmd_report(args: argparse.Namespace, mappings: list[tuple[str, str]]) -> int:
-    """Show how each source path stands on this machine. Read-only."""
-    db = open_db(args.database, read_only=True)
+def report(database: Path, mappings: list[tuple[str, str]]) -> int:
+    """Show how each source path stands on this machine. Read-only.
+
+    Callable directly so ``kcsync paths`` does not have to fabricate an
+    argparse namespace just to reach it.
+    """
+    db = open_db(database, read_only=True)
     try:
         if "uri" not in _columns(db, "sources"):
             print("  no sources table in this database")
@@ -428,6 +438,10 @@ def cmd_report(args: argparse.Namespace, mappings: list[tuple[str, str]]) -> int
         print("  → give machine-specific paths a name in the path map so they travel:")
         print("      see path_map.conf.example")
     return 0 if broken == 0 else 1
+
+
+def cmd_report(args: argparse.Namespace, mappings: list[tuple[str, str]]) -> int:
+    return report(args.database, mappings)
 
 
 COMMANDS = {"encode": cmd_encode, "decode": cmd_decode, "report": cmd_report}

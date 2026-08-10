@@ -12,6 +12,39 @@ since then, and combines both.
 ./kirocrew-sync.sh sync
 ```
 
+## What is it for?
+
+**Primarily: keeping one person's KiroCrew data consistent across their own
+computers.** Laptop, desktop, work machine — you sit down at whichever one is
+in front of you, run `sync`, and your chat history, knowledge base, artifacts
+and learned lessons are there, merged rather than overwritten. That is the case
+it is designed and tested for. It is not limited to two machines: each machine
+publishes its own state and merges every other machine's.
+
+**A team can also share one knowledge library**, using `--team`:
+
+```bash
+./kirocrew-sync.sh sync --team
+```
+
+Team scope publishes the knowledge base, artifacts, tags and learned lessons,
+and holds back everything personal — chat transcripts, episodic memory, and
+per-person config. It is off by default, so nothing changes unless you ask for
+it. See [Team scope](#team-scope) for exactly what travels and what does not.
+
+Two caveats that apply to team use regardless of scope:
+
+- **No access control.** Anyone who can read the storage backend gets
+  everything that was published to it. Scope decides what is published; it does
+  not decide who may read it.
+- **Concurrent publishing races.** A machine that publishes between another
+  machine's pull and push has its bundle removed from the remote. Nothing is
+  lost — it is restored on that machine's next sync — but the window is hit
+  more often the more people are syncing.
+
+If you need per-user permissions or many simultaneous writers, this is the
+wrong tool.
+
 ## Why three-way sync matters here
 
 A one-directional copy forces you to remember which laptop has newer data, and
@@ -268,7 +301,7 @@ SYNC_BACKEND=rsync ./kirocrew-sync.sh sync
 
 Or edit `config.sh` to set the backend for every run:
 ```bash
-export SYNC_BACKEND="gdrive"  # or s3, rsync
+export SYNC_BACKEND="gdrive"  # or s3, rsync, local
 ```
 
 The environment wins over `config.sh`, so the one-off form above overrides the
@@ -430,6 +463,59 @@ wrong directory.
 - Requires `python3` (standard library only — no packages to install). Without
   it, sync still works and warns that paths are travelling verbatim.
 
+## Team Scope
+
+By default, sync is **personal**: it assumes every machine belongs to you and
+moves everything syncable between them. `--team` switches to sharing a library
+with colleagues, and narrows what leaves the machine.
+
+```bash
+./kirocrew-sync.sh sync --team
+```
+
+Set it permanently in `config.sh` instead of typing it each time — forgetting
+the flag once is the failure mode this is meant to avoid:
+
+```bash
+export SYNC_SCOPE="team"
+```
+
+### What travels
+
+| | Personal | Team |
+|---|---|---|
+| Knowledge base (sources, items, entities, relations, mentions) | ✅ | ✅ |
+| Learned lessons (`semantic_memory`) | ✅ | ✅ |
+| Artifacts, `tags.json`, `tag_boards.json` | ✅ | ✅ |
+| Chat transcripts (`sessions/*.jsonl`) | ✅ | ❌ |
+| Episodic memory — raw conversation text | ✅ | ❌ |
+| Memory event log | ✅ | ❌ |
+| Personal config (`config.json`, `hooks.json`, `autonudge.json`, …) | ✅ | ❌ |
+| Per-machine ingest state (`folder_file_state`) | ✅ | ❌ |
+| API tokens and credentials | ❌ | ❌ |
+
+Team scope is an **allowlist**: a table or file travels only if it is
+explicitly marked shared. A table added by a future KiroCrew version therefore
+stays on the machine until someone decides it is safe to publish — the only
+direction in which a wrong guess is harmless.
+
+### Things worth knowing
+
+- **Each scope keeps its own sync repo** (`.sync/repo` and `.sync/repo-team`),
+  so one machine can sync personally with one config and with a team using
+  another. They have separate merge bases and never see each other's data.
+- **Mixing scopes is refused, not merged.** A machine syncing personally
+  against a team backend is quarantined with a scope mismatch, so forgetting
+  `--team` once cannot publish your transcripts into the team's history.
+- **Folder source paths are visible to colleagues.** `sources.uri` has to
+  travel — every knowledge item references it — so a folder source added on
+  your machine shows up as `~/code/whatever` for the team. Portable-path
+  encoding (ADR 0001) strips your home directory, not the rest of the path.
+- **Team scope does not retract what personal scope already published.** If you
+  synced a backend personally and then switch it to team, the earlier data is
+  still in that repo's history. Start a team scope against a fresh backend
+  location.
+
 ## Safety Features
 
 - **Running check**: refuses to write merged data while KiroCrew is running.
@@ -443,6 +529,9 @@ wrong directory.
   versions instead of blending incompatible schemas.
 - **Embedding gate**: refuses to mix vectors from different embedding models,
   which would otherwise degrade semantic search with no visible error.
+- **Quarantine, not deadlock**: a machine either gate rejects is skipped, while
+  every other machine still syncs. It is re-checked on each sync and rejoins on
+  its own once it catches up, so one lagging laptop never blocks the rest.
 - **Credential allowlist**: only explicitly listed paths are ever published.
 - **Full history**: every sync is a git commit in `~/.kiro/crew/.sync/repo`,
   so any previous state can be recovered.
@@ -455,12 +544,18 @@ Quit the KiroCrew app, then re-run. To look around without stopping it:
 ./kirocrew-sync.sh sync --dry-run
 ```
 
-### "schema drift" or "embedding space mismatch"
-The two machines are on different KiroCrew versions or different embedding
-models. Bring them into line, then sync. To override deliberately:
+### "N machine(s) quarantined"
+That machine is on a different KiroCrew version or embedding model, so its
+changes were skipped. Everything else still synced, and `sync` exits `3` to
+say so. Nothing to do here — bring that machine up to date and the next
+ordinary sync merges it automatically. `status` lists who is quarantined.
+
+To merge it now anyway, knowing the schemas or vectors differ:
 ```bash
 ./kirocrew-sync.sh sync --force
 ```
+`--force` is not scoped to one machine: it drops the compatibility check for
+every machine and every preflight gate at once.
 
 ### A sync stopped on conflicts
 ```bash
@@ -504,7 +599,8 @@ For the other backends, see the troubleshooting section of
 ## Tests
 
 ```bash
-./tests/run_tests.sh               # two-machine three-way merge, 45 assertions
+./tests/run_tests.sh               # two-machine three-way merge, 59 assertions
+./tests/test_team_scope.sh         # what team scope shares and withholds
 ./tests/test_portable_paths.sh     # path translation
 ./tests/test_sync_paths.sh         # path round trip between two machines
 ./tests/test_config_precedence.sh  # environment vs config.sh vs defaults

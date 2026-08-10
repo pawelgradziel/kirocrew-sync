@@ -125,25 +125,21 @@ backend_status() {
     if check_gdrive_configured 2>/dev/null; then
         log_success "Google Drive configured"
         
-        # Check if sync directory exists
         if rclone lsd "${GDRIVE_REMOTE_NAME}:" 2>/dev/null | grep -q "${GDRIVE_SYNC_DIR}"; then
-            log_info "\nRemote sync data:"
-            
-            # Get manifest info if exists
-            local temp_manifest
-            temp_manifest=$(mktemp)
-            if rclone copyto "${GDRIVE_REMOTE_NAME}:${GDRIVE_SYNC_DIR}/manifest.json" "$temp_manifest" 2>/dev/null; then
-                local remote_machine
-                remote_machine=$(grep -o '"machine_id": "[^"]*"' "$temp_manifest" | cut -d'"' -f4)
-                local remote_time
-                remote_time=$(grep -o '"timestamp": "[^"]*"' "$temp_manifest" | cut -d'"' -f4)
-                
-                echo "  Last sync from: $remote_machine"
-                echo "  Last sync time: $remote_time"
+            local bundles
+            bundles="$(rclone lsf "${GDRIVE_REMOTE_NAME}:${GDRIVE_SYNC_DIR}/bundles" \
+                --include '*.bundle' 2>/dev/null || true)"
+            if [ -n "$bundles" ]; then
+                local count
+                count="$(printf '%s\n' "$bundles" | grep -c . || true)"
+                log_success "Reachable; $count machine bundle(s) present"
+                printf '%s\n' "$bundles" | while read -r bundle; do
+                    [ -n "$bundle" ] || continue
+                    echo "    $(basename "$bundle" .bundle)"
+                done
             else
                 log_warn "No sync data found on remote"
             fi
-            rm -f "$temp_manifest"
         else
             log_warn "Sync directory not found on remote (no data synced yet)"
         fi

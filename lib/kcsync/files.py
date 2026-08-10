@@ -13,9 +13,12 @@ import re
 import shutil
 from pathlib import Path
 
+from . import policy as pol
 from .canon import dumps_pretty
 
 # Only these ever leave the machine.
+# Glob rules (path-aware, not raw fnmatch): * and ? never cross '/', ** spans
+# directories. So "sessions/*.jsonl" is top-level only; use ** for recursion.
 ALLOW = [
     "config.json",
     "tags.json",
@@ -28,6 +31,16 @@ ALLOW = [
     "sessions/*.jsonl",
     "workspace/*.md",
     "workspace/memory/**",
+    "artifacts/**",
+]
+
+# The subset of ALLOW that travels in team scope. Same opt-in rule as tables
+# (see policy.py): anything not named here stays on the machine, so a file
+# added to ALLOW later never reaches colleagues until someone decides it should.
+# Chat transcripts and every per-person config file are deliberately absent.
+TEAM_ALLOW = [
+    "tags.json",
+    "tag_boards.json",
     "artifacts/**",
 ]
 
@@ -56,60 +69,101 @@ SECRET_KEY_RE = re.compile(
     r"private_?key|credential|bearer|webhook)", re.I)
 
 
+def _glob_match(posix, pattern):
+    """Match *posix* against *pattern* with path-aware wildcards.
+
+    Unlike ``fnmatch``, a single ``*`` or ``?`` never crosses ``/``. ``**``
+    matches zero or more path segments (including across separators).
+    """
+    if pattern == "**":
+        return True
+    # A leading ** must be peeled off before a trailing one, or a pattern with
+    # both -- "**/.git/**" -- matches the endswith branch and is read as a
+    # literal directory named "**/.git", which silently denies nothing.
+    if pattern.startswith("**/"):
+        tail = pattern[3:]
+        # Anchor the rest of the pattern at each directory boundary in turn.
+        parts = posix.split("/")
+        for i in range(len(parts)):
+            if _glob_match("/".join(parts[i:]), tail):
+                return True
+        return False
+    if pattern.endswith("/**"):
+        root = pattern[:-3]
+        return posix == root or posix.startswith(root + "/")
+
+    # Component-wise match so * stays within one segment.
+    p_parts = pattern.split("/")
+    n_parts = posix.split("/")
+    if len(p_parts) != len(n_parts):
+        return False
+    for pat, name in zip(p_parts, n_parts):
+        if not fnmatch.fnmatchcase(name, pat):
+            return False
+    return True
+
+
 def _matches(rel_path, patterns):
     posix = rel_path.as_posix()
     for pattern in patterns:
-        if fnmatch.fnmatch(posix, pattern):
-            return True
-        # fnmatch does not treat ** as spanning separators.
-        if pattern.endswith("/**") and (
-                posix == pattern[:-3] or posix.startswith(pattern[:-2])):
-            return True
-        if pattern.startswith("**/") and fnmatch.fnmatch(posix, pattern[3:]):
-            return True
-        if pattern.startswith("**/") and ("/" + posix).endswith("/" + pattern[3:]):
+        if _glob_match(posix, pattern):
             return True
     return False
 
 
-def is_denied(rel_path):
-    return _matches(Path(rel_path), DENY)
-
-
-def is_allowed(rel_path):
+def is_allowed(rel_path, scope=pol.PERSONAL):
     rel_path = Path(rel_path)
     if _matches(rel_path, DENY):
         return False
-    return _matches(rel_path, ALLOW)
+    if not _matches(rel_path, ALLOW):
+        return False
+    if scope == pol.TEAM:
+        return _matches(rel_path, TEAM_ALLOW)
+    return True
 
 
-def iter_syncable(kirocrew_dir):
-    """Every file under the allowlist, relative to the KiroCrew directory."""
+def _iter_files(kirocrew_dir):
+    """One directory walk: yield (absolute, relative) for every regular file."""
     root = Path(kirocrew_dir)
     for path in sorted(root.rglob("*")):
         if not path.is_file() or path.is_symlink():
             continue
-        rel = path.relative_to(root)
-        if is_allowed(rel):
-            yield rel
+        yield path, path.relative_to(root)
 
 
-def vetoed(kirocrew_dir):
-    """Allowlisted paths the denylist overrides.
+def scan_tree(kirocrew_dir, scope=pol.PERSONAL):
+    """One walk, three answers: (syncable, vetoed, big_excluded).
 
-    The credential patterns are deliberately broad, so they can also catch
-    ordinary content, e.g. an artifact whose filename contains "secret".
-    Reporting these keeps the exclusion from being silent.
+    *vetoed* is the allowlisted paths the denylist overrides. The credential
+    patterns are deliberately broad, so they can also catch ordinary content --
+    e.g. an artifact whose filename contains "secret". Reporting these keeps
+    the exclusion from being silent.
+
+    A path held back only because the scope is team counts as neither syncable
+    nor vetoed; `withheld_for_scope` reports those separately.
     """
     root = Path(kirocrew_dir)
-    out = []
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.is_symlink():
-            continue
-        rel = path.relative_to(root)
-        if _matches(rel, ALLOW) and _matches(rel, DENY):
-            out.append(rel)
-    return out
+    syncable, veto, big = [], [], []
+    for path, rel in _iter_files(root):
+        allow = _matches(rel, ALLOW)
+        deny = _matches(rel, DENY)
+        if allow and deny:
+            veto.append(rel)
+        elif allow and (scope != pol.TEAM or _matches(rel, TEAM_ALLOW)):
+            syncable.append(rel)
+        elif not allow and rel.parent == Path(".") \
+                and path.stat().st_size > 1024 * 1024:
+            big.append((rel, path.stat().st_size))
+    return syncable, veto, big
+
+
+def withheld_for_scope(kirocrew_dir, scope):
+    """Allowlisted paths that team scope keeps at home. Empty when personal."""
+    if scope != pol.TEAM:
+        return []
+    return [rel for _, rel in _iter_files(kirocrew_dir)
+            if _matches(rel, ALLOW) and not _matches(rel, DENY)
+            and not _matches(rel, TEAM_ALLOW)]
 
 
 def strip_secrets(value, path=""):
@@ -150,13 +204,18 @@ def _graft_local_secrets(merged, local):
     return merged
 
 
-def unpack_files(kirocrew_dir, out_dir, log=print):
-    """Copy allowlisted files into the repo, normalizing JSON and redacting."""
+def unpack_files(kirocrew_dir, out_dir, log=print, scope=pol.PERSONAL):
+    """Copy allowlisted files into the repo, normalizing JSON and redacting.
+
+    Returns (written, redacted, vetoed) from a single directory walk; the
+    caller reports the vetoed paths rather than walking the tree again.
+    """
     root, out = Path(kirocrew_dir), Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     written, redacted = set(), []
+    syncable, veto, _ = scan_tree(root, scope)
 
-    for rel in iter_syncable(root):
+    for rel in syncable:
         src, dest = root / rel, out / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
 
@@ -185,11 +244,18 @@ def unpack_files(kirocrew_dir, out_dir, log=print):
         elif path.is_dir() and not any(path.iterdir()):
             path.rmdir()
 
-    return written, redacted
+    return written, redacted, veto
 
 
-def pack_files(in_dir, kirocrew_dir, dry_run=False, log=print):
-    """Copy repo files back, re-grafting local secrets into JSON."""
+def pack_files(in_dir, kirocrew_dir, dry_run=False, log=print,
+               scope=pol.PERSONAL):
+    """Copy repo files back, re-grafting local secrets into JSON.
+
+    The scope check runs on the way in as well as on the way out. A team repo
+    should never contain a personal path, but if one arrives -- from a machine
+    running an older build, or a hand-edited repo -- refusing to write it keeps
+    a colleague's transcripts off this disk.
+    """
     root, src_root = Path(kirocrew_dir), Path(in_dir)
     applied = 0
     if not src_root.exists():
@@ -199,8 +265,8 @@ def pack_files(in_dir, kirocrew_dir, dry_run=False, log=print):
         if not path.is_file():
             continue
         rel = path.relative_to(src_root)
-        if not is_allowed(rel):
-            log("  WARN: refusing to write non-allowlisted path %s" % rel)
+        if not is_allowed(rel, scope):
+            log("  WARN: refusing to write out-of-scope path %s" % rel)
             continue
         dest = root / rel
 

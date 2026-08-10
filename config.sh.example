@@ -2,11 +2,18 @@
 # KiroCrew Sync Configuration
 # Copy this file to config.sh and customize
 
-# Storage backend: gdrive, s3, rsync, or custom
+# Storage backend: gdrive, s3, rsync, local, or custom
 export SYNC_BACKEND="gdrive"
 
 # KiroCrew data directory (override if non-standard)
 export KIROCREW_DIR="$HOME/.kiro/crew"
+
+# Sync scope: "personal" (default) syncs everything between your own machines.
+# "team" shares a knowledge library with colleagues and holds back chat
+# transcripts, episodic memory and per-person config -- see README, Team Scope.
+# Each scope keeps its own sync repo, so one machine can do both with two
+# config files. Set it here rather than typing --team, so it cannot be missed.
+export SYNC_SCOPE="personal"
 
 # Knowledge path portability
 # Folder sources are rewritten to a machine-independent form on push and back
@@ -32,3 +39,6 @@ export KIROCREW_PATH_MAP="$KIROCREW_DIR/path_map.conf"
 # Rsync settings (edit backends/rsync.sh)
 # - RSYNC_HOST: user@hostname
 # - RSYNC_PATH: remote directory path
+
+# Local directory settings (edit backends/local.sh) — Dropbox, Syncthing, NAS, USB
+# - LOCAL_SYNC_DIR: shared folder path (default: $HOME/Dropbox/KiroCrew-Sync)

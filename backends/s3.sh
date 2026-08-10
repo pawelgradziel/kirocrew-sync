@@ -93,14 +93,19 @@ backend_status() {
     if check_s3_configured 2>/dev/null; then
         log_success "S3 bucket accessible"
         
-        # Check if manifest exists
-        if aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/manifest.json" --profile "$AWS_PROFILE" &>/dev/null; then
-            log_info "\nRemote sync data found"
-            
-            # Get last modified time
-            local last_modified
-            last_modified=$(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/manifest.json" --profile "$AWS_PROFILE" | awk '{print $1, $2}')
-            echo "  Last modified: $last_modified"
+        local listing
+        listing="$(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/bundles/" \
+            --profile "$AWS_PROFILE" 2>/dev/null || true)"
+        local bundles
+        bundles="$(printf '%s\n' "$listing" | awk '/\.bundle$/ {print $NF}')"
+        if [ -n "$bundles" ]; then
+            local count
+            count="$(printf '%s\n' "$bundles" | grep -c . || true)"
+            log_success "Reachable; $count machine bundle(s) present"
+            printf '%s\n' "$bundles" | while read -r bundle; do
+                [ -n "$bundle" ] || continue
+                echo "    $(basename "$bundle" .bundle)"
+            done
         else
             log_warn "No sync data found on remote"
         fi

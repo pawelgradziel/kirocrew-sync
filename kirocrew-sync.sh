@@ -2,7 +2,7 @@
 #
 # KiroCrew Sync - three-way sync with modular storage backends
 # Supports: Linux, macOS
-# Storage backends: Google Drive, S3, rclone, rsync
+# Storage backends: Google Drive, S3, rsync, local directory
 #
 # Sync works on an unpacked, canonical form of KiroCrew's state rather than on
 # the raw files. Databases become one JSONL file per table; git tracks that
@@ -21,6 +21,7 @@ ENV_SYNC_BACKEND="${SYNC_BACKEND:-}"
 ENV_KIROCREW_DIR="${KIROCREW_DIR:-}"
 ENV_SYNC_PORTABLE_PATHS="${SYNC_PORTABLE_PATHS:-}"
 ENV_KIROCREW_PATH_MAP="${KIROCREW_PATH_MAP:-}"
+ENV_SYNC_SCOPE="${SYNC_SCOPE:-}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -57,15 +58,34 @@ source "$BACKEND_FILE"
 # form on the way out and back to this machine's paths on the way in, so folder
 # sources keep working after a sync. Set SYNC_PORTABLE_PATHS=0 to sync URIs
 # verbatim instead. See docs/adr/0001-knowledge-path-portability.md
-PORTABLE_PATHS_TOOL="$SCRIPT_DIR/lib/portable_paths.py"
 SYNC_PORTABLE_PATHS="${ENV_SYNC_PORTABLE_PATHS:-${SYNC_PORTABLE_PATHS:-1}}"
 KIROCREW_PATH_MAP="${ENV_KIROCREW_PATH_MAP:-${KIROCREW_PATH_MAP:-$KIROCREW_DIR/path_map.conf}}"
 export KIROCREW_PATH_MAP SYNC_PORTABLE_PATHS
 
+# Sync scope. "personal" is your own machines and syncs everything syncable;
+# "team" shares a library with colleagues and publishes only what is marked
+# shared -- no transcripts, no per-person config. Off by default; set here or
+# with --team, and the environment still wins over config.sh.
+SYNC_SCOPE="${ENV_SYNC_SCOPE:-${SYNC_SCOPE:-personal}}"
+
 SYNC_ROOT="$KIROCREW_DIR/.sync"
-SYNC_REPO="$SYNC_ROOT/repo"
-CONFLICT_LOG="$SYNC_ROOT/conflicts.jsonl"
 SYNC_BRANCH="main"
+
+# Each scope gets its own repo. They hold different subsets of the same data,
+# so sharing one would make switching scope look like a mass deletion, and
+# that deletion would propagate to every other machine on the next sync.
+scope_paths() {
+    if [ "$SYNC_SCOPE" = "team" ]; then
+        SYNC_REPO="$SYNC_ROOT/repo-team"
+        CONFLICT_LOG="$SYNC_ROOT/conflicts-team.jsonl"
+        QUARANTINE_LOG="$SYNC_ROOT/quarantine-team.txt"
+    else
+        SYNC_REPO="$SYNC_ROOT/repo"
+        CONFLICT_LOG="$SYNC_ROOT/conflicts.jsonl"
+        QUARANTINE_LOG="$SYNC_ROOT/quarantine.txt"
+    fi
+}
+scope_paths
 
 STRATEGY="auto"
 DRY_RUN=false
@@ -73,8 +93,30 @@ FORCE=false
 
 PYTHON_BIN="${KIROCREW_SYNC_PYTHON:-python3}"
 
+# Scratch space for the transport payload. Script-level, not local to a
+# command: the EXIT trap fires after the command function has returned, so a
+# local would be out of scope by then -- and under `set -u` that is a fatal
+# error that overwrites the real exit status.
+TEMP_DIR=""
+cleanup_temp() {
+    [ -n "${TEMP_DIR:-}" ] && rm -rf "$TEMP_DIR"
+    return 0
+}
+trap cleanup_temp EXIT
+
+make_temp_dir() {
+    TEMP_DIR="$(mktemp -d)"
+}
+
 kcsync() {
     PYTHONPATH="$SCRIPT_DIR/lib" "$PYTHON_BIN" -m kcsync "$@"
+}
+
+# Same, plus the active scope. Every subcommand that reads or writes KiroCrew
+# data takes --scope; `conflicts` and `merge-driver` do not, and call kcsync
+# directly.
+kcsync_scoped() {
+    kcsync "$@" --scope "$SYNC_SCOPE"
 }
 
 require_python() {
@@ -243,9 +285,14 @@ check_remote_compat() {
         rm -rf "$tmp"
         return 0
     fi
+    # Legacy bundles predate the scope marker; absent means personal.
+    local remote_scope
+    remote_scope="$(git_repo show "$ref:.kcsync-scope" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "$remote_scope" ] || remote_scope="personal"
+
     local rc=0
-    kcsync compat --kirocrew-dir "$KIROCREW_DIR" --remote "$tmp" \
-        --label "$machine" || rc=$?
+    kcsync_scoped compat --kirocrew-dir "$KIROCREW_DIR" --remote "$tmp" \
+        --remote-scope "$remote_scope" --label "$machine" || rc=$?
     rm -rf "$tmp"
     return $rc
 }
@@ -268,8 +315,12 @@ merge_remote_refs() {
             continue   # already have everything from this machine
         fi
 
+        # Quarantine rather than abort: this machine's rows are simply not
+        # merged, which leaves local data exactly as it was. The next sync
+        # re-checks it, so it rejoins on its own once the versions line up.
         if ! $FORCE && ! check_remote_compat "$ref" "$machine"; then
             incompatible=$((incompatible + 1))
+            echo "$machine" >> "$QUARANTINE_LOG"
             continue
         fi
 
@@ -282,10 +333,12 @@ merge_remote_refs() {
 
         # This function's stdout is captured, so diagnostics go to stderr.
         log_info "Merging changes from $machine..." >&2
+        # ${extra[@]+...} rather than "${extra[@]}": bash 3.2, still the system
+        # bash on macOS, treats an empty array as unset under `set -u`.
         if KCSYNC_STRATEGY="$STRATEGY" \
            KCSYNC_REPO="$SYNC_REPO" \
            KCSYNC_CONFLICT_LOG="$CONFLICT_LOG" \
-           git_repo merge -q --no-edit "${extra[@]}" \
+           git_repo merge -q --no-edit ${extra[@]+"${extra[@]}"} \
                 -m "sync: merge $machine" "$ref" 2>/dev/null; then
             merged=$((merged + 1))
         else
@@ -305,24 +358,7 @@ report_conflicts() {
     local total
     total="$(wc -l < "$CONFLICT_LOG" | tr -d ' ')"
     log_warn "$total row conflict(s) resolved automatically:"
-    "$PYTHON_BIN" - "$CONFLICT_LOG" << 'EOF'
-import collections, json, sys
-counts = collections.Counter()
-examples = {}
-with open(sys.argv[1], encoding="utf-8") as fh:
-    for line in fh:
-        line = line.strip()
-        if not line:
-            continue
-        entry = json.loads(line)
-        key = (entry.get("table"), entry.get("kind"), entry.get("resolution"))
-        counts[key] += 1
-        examples.setdefault(key, entry.get("key", ""))
-for (table, kind, resolution), count in counts.most_common(10):
-    sample = str(examples[(table, kind, resolution)])[:60]
-    print("    %-24s %-14s %-12s x%d  e.g. %s"
-          % (table, kind, resolution, count, sample))
-EOF
+    kcsync conflicts "$CONFLICT_LOG" || true
     log_info "Full log: $CONFLICT_LOG"
 }
 
@@ -349,7 +385,7 @@ apply_to_kirocrew() {
     fi
 
     log_info "Applying merged state to KiroCrew..."
-    if ! kcsync pack "${pack_args[@]}"; then
+    if ! kcsync_scoped pack "${pack_args[@]}"; then
         log_error "Pack failed; KiroCrew data was left unchanged (or restored)."
         exit 1
     fi
@@ -370,6 +406,8 @@ cmd_sync() {
     require_python
     ensure_repo
     : > "$CONFLICT_LOG"
+    : > "$QUARANTINE_LOG"
+    local quarantined=0
 
     if [ -n "$(git_repo ls-files -u 2>/dev/null)" ]; then
         log_error "A previous sync left unresolved conflicts."
@@ -378,44 +416,48 @@ cmd_sync() {
     fi
 
     log_info "Unpacking local state..."
-    kcsync unpack --kirocrew-dir "$KIROCREW_DIR" --repo "$SYNC_REPO"
+    kcsync_scoped unpack --kirocrew-dir "$KIROCREW_DIR" --repo "$SYNC_REPO"
     if commit_local_state "sync: local state from $(get_machine_id)"; then
         log_success "Recorded local changes"
     else
         log_info "No local changes since last sync"
     fi
 
-    local temp_dir
-    temp_dir=$(mktemp -d)
-    trap 'rm -rf "$temp_dir"' EXIT
+    make_temp_dir
 
     log_info "Fetching from $BACKEND..."
-    if ! backend_pull "$temp_dir" 2>/dev/null; then
+    if ! backend_pull "$TEMP_DIR" 2>/dev/null; then
         log_warn "Nothing to pull (first sync, or remote not reachable)"
     fi
 
     local fetched
-    fetched="$(fetch_bundles "$temp_dir")"
+    fetched="$(fetch_bundles "$TEMP_DIR")"
     if [ "$fetched" -gt 0 ]; then
         log_success "Fetched $fetched remote machine(s)"
         local result merged conflicted incompatible
         result="$(merge_remote_refs)"
-        merged="$(echo "$result" | awk '{print $1}')"
-        conflicted="$(echo "$result" | awk '{print $2}')"
-        incompatible="$(echo "$result" | awk '{print $3}')"
+        read -r merged conflicted incompatible <<< "$result"
 
         if [ "$conflicted" -gt 0 ]; then
             report_conflicts
             show_unresolved
             exit 1
         fi
-        if [ "${incompatible:-0}" -gt 0 ]; then
-            log_error "Skipped $incompatible incompatible machine(s); see above."
-            log_info "Bring both machines to the same KiroCrew version and"
-            log_info "embedding model, or override with --force."
-            exit 1
-        fi
         [ "$merged" -gt 0 ] && log_success "Merged $merged remote machine(s)"
+
+        # An incompatible machine is quarantined, not fatal. Its rows were
+        # never merged, so nothing local is at risk -- and refusing to
+        # continue would punish the machines that did merge cleanly. It is
+        # re-checked every sync and rejoins by itself once both sides run the
+        # same KiroCrew version and embedding model.
+        if [ "${incompatible:-0}" -gt 0 ]; then
+            quarantined=$incompatible
+            log_warn "$incompatible machine(s) quarantined; their changes were not merged:"
+            sed 's/^/    /' "$QUARANTINE_LOG"
+            log_info "Nothing to do here: the next sync re-checks them and"
+            log_info "merges automatically once the versions match. To merge"
+            log_info "one now anyway, re-run with --force."
+        fi
     else
         log_info "No remote machines found"
     fi
@@ -425,10 +467,15 @@ cmd_sync() {
 
     if $DRY_RUN; then
         log_success "Dry run complete. Nothing was written or published."
+        [ "$quarantined" -gt 0 ] && return 3
         return 0
     fi
 
-    publish_bundle "$temp_dir"
+    publish_bundle "$TEMP_DIR"
+    if [ "$quarantined" -gt 0 ]; then
+        log_warn "Sync complete, with $quarantined machine(s) still quarantined"
+        return 3
+    fi
     log_success "Sync complete"
 }
 
@@ -446,14 +493,13 @@ cmd_resume() {
         log_success "Completed the pending merge"
     fi
 
+    report_conflicts
     apply_to_kirocrew
     $DRY_RUN && { log_success "Dry run complete."; return 0; }
 
-    local temp_dir
-    temp_dir=$(mktemp -d)
-    trap 'rm -rf "$temp_dir"' EXIT
-    backend_pull "$temp_dir" 2>/dev/null || true
-    publish_bundle "$temp_dir"
+    make_temp_dir
+    backend_pull "$TEMP_DIR" 2>/dev/null || true
+    publish_bundle "$TEMP_DIR"
     log_success "Sync complete"
 }
 
@@ -461,7 +507,7 @@ cmd_push() {
     require_python
     ensure_repo
     log_info "Unpacking local state..."
-    kcsync unpack --kirocrew-dir "$KIROCREW_DIR" --repo "$SYNC_REPO"
+    kcsync_scoped unpack --kirocrew-dir "$KIROCREW_DIR" --repo "$SYNC_REPO"
     commit_local_state "push: local state from $(get_machine_id)" || \
         log_info "No local changes since last sync"
 
@@ -470,13 +516,11 @@ cmd_push() {
         return 0
     fi
 
-    local temp_dir
-    temp_dir=$(mktemp -d)
-    trap 'rm -rf "$temp_dir"' EXIT
+    make_temp_dir
     # Backends mirror with delete, so other machines' bundles must be carried
     # forward rather than dropped.
-    backend_pull "$temp_dir" 2>/dev/null || true
-    publish_bundle "$temp_dir"
+    backend_pull "$TEMP_DIR" 2>/dev/null || true
+    publish_bundle "$TEMP_DIR"
     log_success "Push completed"
     log_info "This published local state without merging. Use 'sync' for two-way."
 }
@@ -491,6 +535,7 @@ cmd_status() {
     require_python
     log_info "Machine ID: $(get_machine_id)"
     log_info "Backend:    $BACKEND"
+    log_info "Scope:      $SYNC_SCOPE"
     log_info "Sync repo:  $SYNC_REPO"
     echo
 
@@ -505,7 +550,7 @@ cmd_status() {
             log_error "A merge is in progress; run '$0 resume' after resolving."
             git_repo diff --name-only --diff-filter=U | sed 's/^/    /'
         else
-            kcsync unpack --kirocrew-dir "$KIROCREW_DIR" --repo "$SYNC_REPO" \
+            kcsync_scoped unpack --kirocrew-dir "$KIROCREW_DIR" --repo "$SYNC_REPO" \
                 > /dev/null 2>&1 || true
             local changed
             changed="$(git_repo status --porcelain | wc -l | tr -d ' ')"
@@ -516,27 +561,27 @@ cmd_status() {
                 log_success "No local changes since last sync"
             fi
         fi
+        # A quarantine is easy to miss in a long sync log, and it persists
+        # until the other machine catches up, so surface it here too.
+        if [ -s "$QUARANTINE_LOG" ]; then
+            log_warn "Quarantined at the last sync (different KiroCrew version"
+            log_warn "or embedding model; their changes were not merged):"
+            sed 's/^/    /' "$QUARANTINE_LOG"
+        fi
     else
         log_warn "No sync repo yet. Run: $0 sync"
     fi
 
     echo
-    kcsync doctor --kirocrew-dir "$KIROCREW_DIR" || true
+    kcsync_scoped doctor --kirocrew-dir "$KIROCREW_DIR" || true
     echo
     backend_status
 }
 
 cmd_paths() {
-    local db="$KIROCREW_DIR/workspace/knowledge/knowledge.db"
-
     log_info "Knowledge source paths on this machine"
 
     require_python
-    if [ ! -f "$db" ]; then
-        log_warn "No knowledge database at $db"
-        return 0
-    fi
-
     if [ -f "$KIROCREW_PATH_MAP" ]; then
         log_info "Path map: $KIROCREW_PATH_MAP"
     else
@@ -547,21 +592,25 @@ cmd_paths() {
     fi
     echo
 
-    if "$PYTHON_BIN" "$PORTABLE_PATHS_TOOL" report "$db"; then
-        log_success "All source paths resolve on this machine"
-    else
-        log_warn "Some source paths need attention (see above)"
-    fi
+    # "Nothing to check" is not the same answer as "everything is fine", so
+    # kcsync distinguishes them: 0 all resolve, 1 needs attention, 2 no data.
+    local rc=0
+    kcsync_scoped paths --kirocrew-dir "$KIROCREW_DIR" || rc=$?
+    case "$rc" in
+        0) log_success "All source paths resolve on this machine" ;;
+        2) log_warn "Nothing to check yet (see above)" ;;
+        *) log_warn "Some source paths need attention (see above)" ;;
+    esac
 }
 
 cmd_doctor() {
     require_python
     require_git
-    kcsync doctor --kirocrew-dir "$KIROCREW_DIR" || true
+    kcsync_scoped doctor --kirocrew-dir "$KIROCREW_DIR" || true
     if [ -d "$SYNC_REPO/.git" ]; then
         echo
         log_info "Preflight gates:"
-        kcsync gates --kirocrew-dir "$KIROCREW_DIR" --repo "$SYNC_REPO" || true
+        kcsync_scoped gates --kirocrew-dir "$KIROCREW_DIR" --repo "$SYNC_REPO" || true
     fi
 }
 
@@ -573,7 +622,7 @@ cmd_init() {
 #!/usr/bin/env bash
 # KiroCrew Sync Configuration
 
-# Storage backend: gdrive, s3, rclone, rsync
+# Storage backend: gdrive, s3, rsync, local, or custom
 export SYNC_BACKEND="gdrive"
 
 # KiroCrew data directory (override if needed)
@@ -591,7 +640,6 @@ EOF
         log_success "Created config file: $CONFIG_FILE"
     fi
 
-    mkdir -p "$SCRIPT_DIR/backends"
     require_python
     ensure_repo
 
@@ -624,23 +672,47 @@ Options:
   --strategy <s>   Conflict resolution: auto (default), local-wins,
                    remote-wins, manual
   --dry-run        Analyze and merge, but do not write or publish
-  --force          Proceed even if a preflight gate fails
+  --team           Share a library with colleagues instead of syncing your
+                   own machines: publishes the knowledge base, artifacts,
+                   tags and learned lessons, and holds back chat transcripts,
+                   episodic memory and per-person config. Off by default.
+                   Equivalent to --scope team, or SYNC_SCOPE=team in config.
+  --force          Merge quarantined machines and pack even if a preflight
+                   gate fails. Applies to every machine at once, so it is
+                   not the way to work around a single lagging machine --
+                   sync already skips those and carries on.
+
+Exit codes:
+  0   Success
+  1   Sync stopped; your data was not changed
+  3   Sync completed, but one or more machines stayed quarantined
 
 Environment variables:
-  SYNC_BACKEND          Storage backend (default: gdrive)
+  SYNC_BACKEND          Storage backend: gdrive, s3, rsync, local (default: gdrive)
   KIROCREW_DIR          KiroCrew data directory (default: ~/.kiro/crew)
   KIROCREW_PATH_MAP     Path mapping file (default: \$KIROCREW_DIR/path_map.conf)
   SYNC_PORTABLE_PATHS   Rewrite knowledge paths for portability (default: 1)
+  SYNC_SCOPE            personal (default) or team
 
 Examples:
   $0 sync
   $0 sync --dry-run
   $0 sync --strategy local-wins
+  $0 sync --team
   SYNC_BACKEND=s3 $0 sync
 
 Conflicts are resolved per row, not per file. "auto" keeps the most
 recently updated version of each row and never drops an edit in favour
 of a deletion. See docs/adr/0002-three-way-sync-via-unpacked-git-repo.md
+
+A machine on a different KiroCrew version or embedding model is
+quarantined: its changes are skipped, everyone else still syncs, and it
+rejoins on its own once it catches up. "$0 status" lists any. Machines
+syncing at a different scope are quarantined the same way, so a personal
+and a team machine can never merge into each other by accident.
+
+Each scope keeps its own sync repo and merge base, so the same machine can
+sync personally with one config and with a team using another.
 EOF
 }
 
@@ -655,6 +727,9 @@ while [ $# -gt 0 ]; do
             STRATEGY="${1#*=}"; shift ;;
         --dry-run)  DRY_RUN=true; shift ;;
         --force)    FORCE=true; shift ;;
+        --team)     SYNC_SCOPE="team"; scope_paths; shift ;;
+        --scope)    SYNC_SCOPE="${2:-personal}"; scope_paths; shift 2 ;;
+        --scope=*)  SYNC_SCOPE="${1#*=}"; scope_paths; shift ;;
         *)
             log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
@@ -664,6 +739,13 @@ case "$STRATEGY" in
     auto|local-wins|remote-wins|manual) ;;
     *) log_error "Unknown strategy: $STRATEGY"
        log_info  "Valid: auto, local-wins, remote-wins, manual"
+       exit 1 ;;
+esac
+
+case "$SYNC_SCOPE" in
+    personal|team) ;;
+    *) log_error "Unknown scope: $SYNC_SCOPE"
+       log_info  "Valid: personal (default), team"
        exit 1 ;;
 esac
 

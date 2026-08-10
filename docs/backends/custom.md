@@ -38,12 +38,17 @@ the top of the file becomes backend configuration.
 
 - `bundle_dir` is a fresh `mktemp -d` directory, removed after the command
   finishes. Do not cache anything there between runs.
-- On push it already holds the prepared bundle, with knowledge paths rewritten
-  into portable form. Send its contents verbatim; do not rewrite files.
-- On pull you must fill it. `manifest.json` is what the sync script checks for:
-  if it is missing after `backend_pull`, the pull is treated as failed and
-  nothing is applied locally.
-- Return non-zero on failure. Push and pull both stop there.
+- On push it holds the prepared transport payload: one git bundle per machine
+  under `bundles/<machine-id>.bundle` (and any other machines' bundles the
+  script re-pulled so a delete-mirroring transport does not drop them). Send
+  its contents verbatim; do not rewrite files.
+- On pull, fill `bundle_dir` with whatever is on the remote (typically the
+  `bundles/` tree). An empty remote is fine — the sync script treats a failed
+  or empty pull as "nothing to merge" and still packs and publishes local
+  state.
+- `backend_status` should report reachability and list machine bundles under
+  `bundles/*.bundle` when present (see `backends/local.sh`).
+- Return non-zero on failure. Push stops there; pull failure only warns.
 - Exclude `*.lock` and `*.tmp` if your transport can, matching the other
   backends.
 
@@ -60,5 +65,5 @@ Also add a reachability check that runs before push and pull, and fails with
 instructions rather than a raw transport error — see `check_gdrive_configured`
 in `backends/gdrive.sh` for the shape.
 
-See `backends/gdrive.sh`, `backends/s3.sh`, and `backends/rsync.sh` for complete
-working examples.
+See `backends/gdrive.sh`, `backends/s3.sh`, `backends/rsync.sh`, and
+`backends/local.sh` for complete working examples.

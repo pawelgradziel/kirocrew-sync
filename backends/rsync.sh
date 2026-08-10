@@ -85,23 +85,17 @@ backend_status() {
     if check_rsync_configured 2>/dev/null; then
         log_success "Remote host accessible"
         
-        # Check if manifest exists
-        if ssh "${RSYNC_HOST%%:*}" "test -f ${RSYNC_PATH}/manifest.json" 2>/dev/null; then
-            log_info "\nRemote sync data found"
-            
-            # Get remote machine info
-            local manifest_content
-            manifest_content=$(ssh "${RSYNC_HOST%%:*}" "cat ${RSYNC_PATH}/manifest.json" 2>/dev/null)
-            
-            if [ -n "$manifest_content" ]; then
-                local remote_machine
-                remote_machine=$(echo "$manifest_content" | grep -o '"machine_id": "[^"]*"' | cut -d'"' -f4)
-                local remote_time
-                remote_time=$(echo "$manifest_content" | grep -o '"timestamp": "[^"]*"' | cut -d'"' -f4)
-                
-                echo "  Last sync from: $remote_machine"
-                echo "  Last sync time: $remote_time"
-            fi
+        local bundles
+        bundles="$(ssh "${RSYNC_HOST%%:*}" \
+            "find ${RSYNC_PATH}/bundles -name '*.bundle' 2>/dev/null" || true)"
+        if [ -n "$bundles" ]; then
+            local count
+            count="$(printf '%s\n' "$bundles" | grep -c . || true)"
+            log_success "Reachable; $count machine bundle(s) present"
+            printf '%s\n' "$bundles" | while read -r bundle; do
+                [ -n "$bundle" ] || continue
+                echo "    $(basename "$bundle" .bundle)"
+            done
         else
             log_warn "No sync data found on remote"
         fi
