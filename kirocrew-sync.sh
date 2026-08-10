@@ -21,6 +21,7 @@ ENV_SYNC_BACKEND="${SYNC_BACKEND:-}"
 ENV_KIROCREW_DIR="${KIROCREW_DIR:-}"
 ENV_SYNC_PORTABLE_PATHS="${SYNC_PORTABLE_PATHS:-}"
 ENV_KIROCREW_PATH_MAP="${KIROCREW_PATH_MAP:-}"
+ENV_SYNC_SCOPE="${SYNC_SCOPE:-}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -61,11 +62,30 @@ SYNC_PORTABLE_PATHS="${ENV_SYNC_PORTABLE_PATHS:-${SYNC_PORTABLE_PATHS:-1}}"
 KIROCREW_PATH_MAP="${ENV_KIROCREW_PATH_MAP:-${KIROCREW_PATH_MAP:-$KIROCREW_DIR/path_map.conf}}"
 export KIROCREW_PATH_MAP SYNC_PORTABLE_PATHS
 
+# Sync scope. "personal" is your own machines and syncs everything syncable;
+# "team" shares a library with colleagues and publishes only what is marked
+# shared -- no transcripts, no per-person config. Off by default; set here or
+# with --team, and the environment still wins over config.sh.
+SYNC_SCOPE="${ENV_SYNC_SCOPE:-${SYNC_SCOPE:-personal}}"
+
 SYNC_ROOT="$KIROCREW_DIR/.sync"
-SYNC_REPO="$SYNC_ROOT/repo"
-CONFLICT_LOG="$SYNC_ROOT/conflicts.jsonl"
-QUARANTINE_LOG="$SYNC_ROOT/quarantine.txt"
 SYNC_BRANCH="main"
+
+# Each scope gets its own repo. They hold different subsets of the same data,
+# so sharing one would make switching scope look like a mass deletion, and
+# that deletion would propagate to every other machine on the next sync.
+scope_paths() {
+    if [ "$SYNC_SCOPE" = "team" ]; then
+        SYNC_REPO="$SYNC_ROOT/repo-team"
+        CONFLICT_LOG="$SYNC_ROOT/conflicts-team.jsonl"
+        QUARANTINE_LOG="$SYNC_ROOT/quarantine-team.txt"
+    else
+        SYNC_REPO="$SYNC_ROOT/repo"
+        CONFLICT_LOG="$SYNC_ROOT/conflicts.jsonl"
+        QUARANTINE_LOG="$SYNC_ROOT/quarantine.txt"
+    fi
+}
+scope_paths
 
 STRATEGY="auto"
 DRY_RUN=false
@@ -90,6 +110,13 @@ make_temp_dir() {
 
 kcsync() {
     PYTHONPATH="$SCRIPT_DIR/lib" "$PYTHON_BIN" -m kcsync "$@"
+}
+
+# Same, plus the active scope. Every subcommand that reads or writes KiroCrew
+# data takes --scope; `conflicts` and `merge-driver` do not, and call kcsync
+# directly.
+kcsync_scoped() {
+    kcsync "$@" --scope "$SYNC_SCOPE"
 }
 
 require_python() {
@@ -258,9 +285,14 @@ check_remote_compat() {
         rm -rf "$tmp"
         return 0
     fi
+    # Legacy bundles predate the scope marker; absent means personal.
+    local remote_scope
+    remote_scope="$(git_repo show "$ref:.kcsync-scope" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "$remote_scope" ] || remote_scope="personal"
+
     local rc=0
-    kcsync compat --kirocrew-dir "$KIROCREW_DIR" --remote "$tmp" \
-        --label "$machine" || rc=$?
+    kcsync_scoped compat --kirocrew-dir "$KIROCREW_DIR" --remote "$tmp" \
+        --remote-scope "$remote_scope" --label "$machine" || rc=$?
     rm -rf "$tmp"
     return $rc
 }
@@ -353,7 +385,7 @@ apply_to_kirocrew() {
     fi
 
     log_info "Applying merged state to KiroCrew..."
-    if ! kcsync pack "${pack_args[@]}"; then
+    if ! kcsync_scoped pack "${pack_args[@]}"; then
         log_error "Pack failed; KiroCrew data was left unchanged (or restored)."
         exit 1
     fi
@@ -384,7 +416,7 @@ cmd_sync() {
     fi
 
     log_info "Unpacking local state..."
-    kcsync unpack --kirocrew-dir "$KIROCREW_DIR" --repo "$SYNC_REPO"
+    kcsync_scoped unpack --kirocrew-dir "$KIROCREW_DIR" --repo "$SYNC_REPO"
     if commit_local_state "sync: local state from $(get_machine_id)"; then
         log_success "Recorded local changes"
     else
@@ -475,7 +507,7 @@ cmd_push() {
     require_python
     ensure_repo
     log_info "Unpacking local state..."
-    kcsync unpack --kirocrew-dir "$KIROCREW_DIR" --repo "$SYNC_REPO"
+    kcsync_scoped unpack --kirocrew-dir "$KIROCREW_DIR" --repo "$SYNC_REPO"
     commit_local_state "push: local state from $(get_machine_id)" || \
         log_info "No local changes since last sync"
 
@@ -503,6 +535,7 @@ cmd_status() {
     require_python
     log_info "Machine ID: $(get_machine_id)"
     log_info "Backend:    $BACKEND"
+    log_info "Scope:      $SYNC_SCOPE"
     log_info "Sync repo:  $SYNC_REPO"
     echo
 
@@ -517,7 +550,7 @@ cmd_status() {
             log_error "A merge is in progress; run '$0 resume' after resolving."
             git_repo diff --name-only --diff-filter=U | sed 's/^/    /'
         else
-            kcsync unpack --kirocrew-dir "$KIROCREW_DIR" --repo "$SYNC_REPO" \
+            kcsync_scoped unpack --kirocrew-dir "$KIROCREW_DIR" --repo "$SYNC_REPO" \
                 > /dev/null 2>&1 || true
             local changed
             changed="$(git_repo status --porcelain | wc -l | tr -d ' ')"
@@ -540,7 +573,7 @@ cmd_status() {
     fi
 
     echo
-    kcsync doctor --kirocrew-dir "$KIROCREW_DIR" || true
+    kcsync_scoped doctor --kirocrew-dir "$KIROCREW_DIR" || true
     echo
     backend_status
 }
@@ -562,7 +595,7 @@ cmd_paths() {
     # "Nothing to check" is not the same answer as "everything is fine", so
     # kcsync distinguishes them: 0 all resolve, 1 needs attention, 2 no data.
     local rc=0
-    kcsync paths --kirocrew-dir "$KIROCREW_DIR" || rc=$?
+    kcsync_scoped paths --kirocrew-dir "$KIROCREW_DIR" || rc=$?
     case "$rc" in
         0) log_success "All source paths resolve on this machine" ;;
         2) log_warn "Nothing to check yet (see above)" ;;
@@ -573,11 +606,11 @@ cmd_paths() {
 cmd_doctor() {
     require_python
     require_git
-    kcsync doctor --kirocrew-dir "$KIROCREW_DIR" || true
+    kcsync_scoped doctor --kirocrew-dir "$KIROCREW_DIR" || true
     if [ -d "$SYNC_REPO/.git" ]; then
         echo
         log_info "Preflight gates:"
-        kcsync gates --kirocrew-dir "$KIROCREW_DIR" --repo "$SYNC_REPO" || true
+        kcsync_scoped gates --kirocrew-dir "$KIROCREW_DIR" --repo "$SYNC_REPO" || true
     fi
 }
 
@@ -639,6 +672,11 @@ Options:
   --strategy <s>   Conflict resolution: auto (default), local-wins,
                    remote-wins, manual
   --dry-run        Analyze and merge, but do not write or publish
+  --team           Share a library with colleagues instead of syncing your
+                   own machines: publishes the knowledge base, artifacts,
+                   tags and learned lessons, and holds back chat transcripts,
+                   episodic memory and per-person config. Off by default.
+                   Equivalent to --scope team, or SYNC_SCOPE=team in config.
   --force          Merge quarantined machines and pack even if a preflight
                    gate fails. Applies to every machine at once, so it is
                    not the way to work around a single lagging machine --
@@ -654,11 +692,13 @@ Environment variables:
   KIROCREW_DIR          KiroCrew data directory (default: ~/.kiro/crew)
   KIROCREW_PATH_MAP     Path mapping file (default: \$KIROCREW_DIR/path_map.conf)
   SYNC_PORTABLE_PATHS   Rewrite knowledge paths for portability (default: 1)
+  SYNC_SCOPE            personal (default) or team
 
 Examples:
   $0 sync
   $0 sync --dry-run
   $0 sync --strategy local-wins
+  $0 sync --team
   SYNC_BACKEND=s3 $0 sync
 
 Conflicts are resolved per row, not per file. "auto" keeps the most
@@ -667,7 +707,12 @@ of a deletion. See docs/adr/0002-three-way-sync-via-unpacked-git-repo.md
 
 A machine on a different KiroCrew version or embedding model is
 quarantined: its changes are skipped, everyone else still syncs, and it
-rejoins on its own once it catches up. "$0 status" lists any.
+rejoins on its own once it catches up. "$0 status" lists any. Machines
+syncing at a different scope are quarantined the same way, so a personal
+and a team machine can never merge into each other by accident.
+
+Each scope keeps its own sync repo and merge base, so the same machine can
+sync personally with one config and with a team using another.
 EOF
 }
 
@@ -682,6 +727,9 @@ while [ $# -gt 0 ]; do
             STRATEGY="${1#*=}"; shift ;;
         --dry-run)  DRY_RUN=true; shift ;;
         --force)    FORCE=true; shift ;;
+        --team)     SYNC_SCOPE="team"; scope_paths; shift ;;
+        --scope)    SYNC_SCOPE="${2:-personal}"; scope_paths; shift 2 ;;
+        --scope=*)  SYNC_SCOPE="${1#*=}"; scope_paths; shift ;;
         *)
             log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
@@ -691,6 +739,13 @@ case "$STRATEGY" in
     auto|local-wins|remote-wins|manual) ;;
     *) log_error "Unknown strategy: $STRATEGY"
        log_info  "Valid: auto, local-wins, remote-wins, manual"
+       exit 1 ;;
+esac
+
+case "$SYNC_SCOPE" in
+    personal|team) ;;
+    *) log_error "Unknown scope: $SYNC_SCOPE"
+       log_info  "Valid: personal (default), team"
        exit 1 ;;
 esac
 

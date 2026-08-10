@@ -13,6 +13,7 @@ import re
 import shutil
 from pathlib import Path
 
+from . import policy as pol
 from .canon import dumps_pretty
 
 # Only these ever leave the machine.
@@ -30,6 +31,16 @@ ALLOW = [
     "sessions/*.jsonl",
     "workspace/*.md",
     "workspace/memory/**",
+    "artifacts/**",
+]
+
+# The subset of ALLOW that travels in team scope. Same opt-in rule as tables
+# (see policy.py): anything not named here stays on the machine, so a file
+# added to ALLOW later never reaches colleagues until someone decides it should.
+# Chat transcripts and every per-person config file are deliberately absent.
+TEAM_ALLOW = [
+    "tags.json",
+    "tag_boards.json",
     "artifacts/**",
 ]
 
@@ -100,11 +111,15 @@ def _matches(rel_path, patterns):
     return False
 
 
-def is_allowed(rel_path):
+def is_allowed(rel_path, scope=pol.PERSONAL):
     rel_path = Path(rel_path)
     if _matches(rel_path, DENY):
         return False
-    return _matches(rel_path, ALLOW)
+    if not _matches(rel_path, ALLOW):
+        return False
+    if scope == pol.TEAM:
+        return _matches(rel_path, TEAM_ALLOW)
+    return True
 
 
 def _iter_files(kirocrew_dir):
@@ -116,26 +131,39 @@ def _iter_files(kirocrew_dir):
         yield path, path.relative_to(root)
 
 
-def scan_tree(kirocrew_dir):
+def scan_tree(kirocrew_dir, scope=pol.PERSONAL):
     """One walk, three answers: (syncable, vetoed, big_excluded).
 
     *vetoed* is the allowlisted paths the denylist overrides. The credential
     patterns are deliberately broad, so they can also catch ordinary content --
     e.g. an artifact whose filename contains "secret". Reporting these keeps
     the exclusion from being silent.
+
+    A path held back only because the scope is team counts as neither syncable
+    nor vetoed; `withheld_for_scope` reports those separately.
     """
     root = Path(kirocrew_dir)
     syncable, veto, big = [], [], []
     for path, rel in _iter_files(root):
         allow = _matches(rel, ALLOW)
         deny = _matches(rel, DENY)
-        if allow and not deny:
-            syncable.append(rel)
-        elif allow and deny:
+        if allow and deny:
             veto.append(rel)
-        elif rel.parent == Path(".") and path.stat().st_size > 1024 * 1024:
+        elif allow and (scope != pol.TEAM or _matches(rel, TEAM_ALLOW)):
+            syncable.append(rel)
+        elif not allow and rel.parent == Path(".") \
+                and path.stat().st_size > 1024 * 1024:
             big.append((rel, path.stat().st_size))
     return syncable, veto, big
+
+
+def withheld_for_scope(kirocrew_dir, scope):
+    """Allowlisted paths that team scope keeps at home. Empty when personal."""
+    if scope != pol.TEAM:
+        return []
+    return [rel for _, rel in _iter_files(kirocrew_dir)
+            if _matches(rel, ALLOW) and not _matches(rel, DENY)
+            and not _matches(rel, TEAM_ALLOW)]
 
 
 def strip_secrets(value, path=""):
@@ -176,7 +204,7 @@ def _graft_local_secrets(merged, local):
     return merged
 
 
-def unpack_files(kirocrew_dir, out_dir, log=print):
+def unpack_files(kirocrew_dir, out_dir, log=print, scope=pol.PERSONAL):
     """Copy allowlisted files into the repo, normalizing JSON and redacting.
 
     Returns (written, redacted, vetoed) from a single directory walk; the
@@ -185,7 +213,7 @@ def unpack_files(kirocrew_dir, out_dir, log=print):
     root, out = Path(kirocrew_dir), Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     written, redacted = set(), []
-    syncable, veto, _ = scan_tree(root)
+    syncable, veto, _ = scan_tree(root, scope)
 
     for rel in syncable:
         src, dest = root / rel, out / rel
@@ -219,8 +247,15 @@ def unpack_files(kirocrew_dir, out_dir, log=print):
     return written, redacted, veto
 
 
-def pack_files(in_dir, kirocrew_dir, dry_run=False, log=print):
-    """Copy repo files back, re-grafting local secrets into JSON."""
+def pack_files(in_dir, kirocrew_dir, dry_run=False, log=print,
+               scope=pol.PERSONAL):
+    """Copy repo files back, re-grafting local secrets into JSON.
+
+    The scope check runs on the way in as well as on the way out. A team repo
+    should never contain a personal path, but if one arrives -- from a machine
+    running an older build, or a hand-edited repo -- refusing to write it keeps
+    a colleague's transcripts off this disk.
+    """
     root, src_root = Path(kirocrew_dir), Path(in_dir)
     applied = 0
     if not src_root.exists():
@@ -230,8 +265,8 @@ def pack_files(in_dir, kirocrew_dir, dry_run=False, log=print):
         if not path.is_file():
             continue
         rel = path.relative_to(src_root)
-        if not is_allowed(rel):
-            log("  WARN: refusing to write non-allowlisted path %s" % rel)
+        if not is_allowed(rel, scope):
+            log("  WARN: refusing to write out-of-scope path %s" % rel)
             continue
         dest = root / rel
 

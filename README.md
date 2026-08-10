@@ -21,27 +21,29 @@ and learned lessons are there, merged rather than overwritten. That is the case
 it is designed and tested for. It is not limited to two machines: each machine
 publishes its own state and merges every other machine's.
 
-**A small team can also share one knowledge base with it** — but read this
-first. Nothing in the merge is single-user; three machines converge
-byte-for-byte just as two do. What is single-user is *what* travels:
+**A team can also share one knowledge library**, using `--team`:
 
-- **Everything is shared, including personal state.** One person's
-  `config.json` settings land on everyone else's machine, and every chat
-  transcript is copied to every machine. There is no per-user scoping and no
-  way to mark a row private.
-- **No access control.** Anyone who can read the storage backend gets the whole
-  knowledge base, all memory, and all transcripts.
-- **Credentials are the exception.** API tokens and secret-shaped JSON values
-  are stripped before publishing and never cross machines.
+```bash
+./kirocrew-sync.sh sync --team
+```
+
+Team scope publishes the knowledge base, artifacts, tags and learned lessons,
+and holds back everything personal — chat transcripts, episodic memory, and
+per-person config. It is off by default, so nothing changes unless you ask for
+it. See [Team scope](#team-scope) for exactly what travels and what does not.
+
+Two caveats that apply to team use regardless of scope:
+
+- **No access control.** Anyone who can read the storage backend gets
+  everything that was published to it. Scope decides what is published; it does
+  not decide who may read it.
 - **Concurrent publishing races.** A machine that publishes between another
   machine's pull and push has its bundle removed from the remote. Nothing is
   lost — it is restored on that machine's next sync — but the window is hit
   more often the more people are syncing.
 
-So a small, trusted team that genuinely wants *one shared brain* can use it, and
-should expect exactly that rather than per-person workspaces. If you need
-private sessions, per-user permissions, or many simultaneous writers, this is
-the wrong tool.
+If you need per-user permissions or many simultaneous writers, this is the
+wrong tool.
 
 ## Why three-way sync matters here
 
@@ -461,6 +463,59 @@ wrong directory.
 - Requires `python3` (standard library only — no packages to install). Without
   it, sync still works and warns that paths are travelling verbatim.
 
+## Team Scope
+
+By default, sync is **personal**: it assumes every machine belongs to you and
+moves everything syncable between them. `--team` switches to sharing a library
+with colleagues, and narrows what leaves the machine.
+
+```bash
+./kirocrew-sync.sh sync --team
+```
+
+Set it permanently in `config.sh` instead of typing it each time — forgetting
+the flag once is the failure mode this is meant to avoid:
+
+```bash
+export SYNC_SCOPE="team"
+```
+
+### What travels
+
+| | Personal | Team |
+|---|---|---|
+| Knowledge base (sources, items, entities, relations, mentions) | ✅ | ✅ |
+| Learned lessons (`semantic_memory`) | ✅ | ✅ |
+| Artifacts, `tags.json`, `tag_boards.json` | ✅ | ✅ |
+| Chat transcripts (`sessions/*.jsonl`) | ✅ | ❌ |
+| Episodic memory — raw conversation text | ✅ | ❌ |
+| Memory event log | ✅ | ❌ |
+| Personal config (`config.json`, `hooks.json`, `autonudge.json`, …) | ✅ | ❌ |
+| Per-machine ingest state (`folder_file_state`) | ✅ | ❌ |
+| API tokens and credentials | ❌ | ❌ |
+
+Team scope is an **allowlist**: a table or file travels only if it is
+explicitly marked shared. A table added by a future KiroCrew version therefore
+stays on the machine until someone decides it is safe to publish — the only
+direction in which a wrong guess is harmless.
+
+### Things worth knowing
+
+- **Each scope keeps its own sync repo** (`.sync/repo` and `.sync/repo-team`),
+  so one machine can sync personally with one config and with a team using
+  another. They have separate merge bases and never see each other's data.
+- **Mixing scopes is refused, not merged.** A machine syncing personally
+  against a team backend is quarantined with a scope mismatch, so forgetting
+  `--team` once cannot publish your transcripts into the team's history.
+- **Folder source paths are visible to colleagues.** `sources.uri` has to
+  travel — every knowledge item references it — so a folder source added on
+  your machine shows up as `~/code/whatever` for the team. Portable-path
+  encoding (ADR 0001) strips your home directory, not the rest of the path.
+- **Team scope does not retract what personal scope already published.** If you
+  synced a backend personally and then switch it to team, the earlier data is
+  still in that repo's history. Start a team scope against a fresh backend
+  location.
+
 ## Safety Features
 
 - **Running check**: refuses to write merged data while KiroCrew is running.
@@ -544,7 +599,8 @@ For the other backends, see the troubleshooting section of
 ## Tests
 
 ```bash
-./tests/run_tests.sh               # two-machine three-way merge, 45 assertions
+./tests/run_tests.sh               # two-machine three-way merge, 59 assertions
+./tests/test_team_scope.sh         # what team scope shares and withholds
 ./tests/test_portable_paths.sh     # path translation
 ./tests/test_sync_paths.sh         # path round trip between two machines
 ./tests/test_config_precedence.sh  # environment vs config.sh vs defaults

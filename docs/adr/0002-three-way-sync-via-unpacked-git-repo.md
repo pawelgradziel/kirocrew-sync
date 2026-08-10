@@ -191,6 +191,19 @@ cross-machine meaning.
   pre-merge, because the merge collapses each row to a single winner and the
   difference is gone afterwards.
 
+- **Sync scope** — `personal` (default) moves everything syncable between one
+  person's machines. `team` shares a library with colleagues and publishes only
+  what is explicitly marked shared: the knowledge base, artifacts, tags and
+  learned lessons, but not transcripts, episodic memory or per-person config.
+  Team scope is an allowlist rather than a denylist, so a table a later
+  KiroCrew version adds stays home until someone decides it may be published —
+  the only direction in which guessing wrong is harmless. The scope is written
+  to `.kcsync-scope` and compared per remote machine, because merging a
+  personal repo into a team one would publish exactly what the scope exists to
+  hold back. Each scope also gets its own repo: they carry different subsets of
+  the same data, so sharing one would make switching scope look like a mass
+  deletion, and that deletion would propagate.
+
 Both gates are scoped to the machine that fails them. A rejected machine is
 *quarantined*: its ref is skipped, every other machine still merges, packs and
 publishes, and `sync` exits 3 to report the partial result. Quarantine is the
@@ -366,6 +379,14 @@ out-of-scope local and every successful sync exited 1 unnoticed. And the
 credential scan unbundles before grepping, because grepping the bundles
 directly searched zlib-compressed packfiles — it would have passed whether or
 not the secret was published. The scan now also asserts it can see known
-content, so it cannot go vacuously green again. `tests/test_sync_paths.sh` covers path portability through
-the new pipeline, and the ADR 0001 suites (`test_portable_paths.sh`,
-`test_config_precedence.sh`) still pass unchanged.
+content, so it cannot go vacuously green again. `tests/test_team_scope.sh` adds 29 assertions for team scope: what reaches a
+colleague, what is left on the machine, that the personal data team scope skips
+is not deleted locally, that a personal-scope machine is quarantined rather
+than merged, and that the two scopes keep separate repos. Its withholding
+assertions read the published bundles, not the receiving machine — data can be
+kept out of a merge and still sit in the bundle for anyone with backend access
+to read.
+
+`tests/test_sync_paths.sh` covers path portability through the new pipeline,
+and the ADR 0001 suites (`test_portable_paths.sh`, `test_config_precedence.sh`)
+still pass unchanged.

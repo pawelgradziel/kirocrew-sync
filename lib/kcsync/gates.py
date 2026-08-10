@@ -20,16 +20,21 @@ WARN = "warn"
 OK = "ok"
 
 
-def _schema_of(db_path, db_name):
+def _schema_of(db_path, db_name, scope):
     conn = connect_ro(db_path)
     try:
-        return schema_text(conn, db_name)
+        return schema_text(conn, db_name, scope)
     finally:
         conn.close()
 
 
-def check_schema_drift(kirocrew_dir, repo_dir):
-    """Compare the merged repo schema against each live database."""
+def check_schema_drift(kirocrew_dir, repo_dir, scope=pol.PERSONAL):
+    """Compare the merged repo schema against each live database.
+
+    Scope matters here: team scope exports a subset of the tables, so the
+    comparison has to be made against that same subset or the gate fires on
+    every sync and users learn to pass --force.
+    """
     results = []
     for db_name, rel in pol.DATABASES.items():
         db_path = Path(kirocrew_dir) / rel
@@ -43,7 +48,7 @@ def check_schema_drift(kirocrew_dir, repo_dir):
             results.append((ERROR, "%s: schema differs between machines "
                                    "(unresolved conflict in _schema.sql)" % db_name))
             continue
-        local_schema = _schema_of(db_path, db_name)
+        local_schema = _schema_of(db_path, db_name, scope)
         if sorted(repo_schema) != sorted(local_schema):
             only_repo = set(repo_schema) - set(local_schema)
             only_local = set(local_schema) - set(repo_schema)
@@ -157,16 +162,30 @@ def _find_secret_leaves(value, path=""):
     return found
 
 
-def run_all(kirocrew_dir, repo_dir):
+def run_all(kirocrew_dir, repo_dir, scope=pol.PERSONAL):
     results = []
-    results.extend(check_schema_drift(kirocrew_dir, repo_dir))
+    results.extend(check_schema_drift(kirocrew_dir, repo_dir, scope))
     results.extend(check_embedding_space(kirocrew_dir, repo_dir))
     results.extend(check_item_embedding_sigs(repo_dir))
     results.extend(check_no_secrets(repo_dir))
     return results
 
 
-def check_compatibility(kirocrew_dir, remote_dir, label):
+def check_scope(local_scope, remote_scope, label):
+    """Refuse to merge a machine syncing at a different scope.
+
+    A personal repo carries transcripts and per-person config that a team repo
+    deliberately excludes. Merging the two would push exactly the data team
+    scope exists to hold back, so the mismatch is treated like any other
+    incompatibility: that machine is quarantined, everyone else carries on.
+    """
+    if local_scope == remote_scope:
+        return []
+    return [(ERROR, "scope mismatch (local %s, remote %s); %s is syncing a "
+                    "different set of data" % (local_scope, remote_scope, label))]
+
+
+def check_compatibility(kirocrew_dir, remote_dir, label, scope=pol.PERSONAL):
     """Compare a remote machine's state against local, before merging.
 
     These two checks have to run pre-merge: the merge collapses each row to a
@@ -175,7 +194,7 @@ def check_compatibility(kirocrew_dir, remote_dir, label):
     mean anything.
     """
     results = []
-    for level, message in check_schema_drift(kirocrew_dir, remote_dir):
+    for level, message in check_schema_drift(kirocrew_dir, remote_dir, scope):
         if level != OK:
             results.append((level, "%s: %s" % (label, message)))
     for level, message in check_embedding_space(kirocrew_dir, remote_dir):

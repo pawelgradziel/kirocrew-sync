@@ -43,16 +43,22 @@ def cmd_unpack(args):
             log("  skip %s (not present)" % rel)
             continue
         out = db_dir / db_name
-        policies = dbio.unpack_db(db_path, out, db_name, blobs)
-        for stale in dbio.stale_jsonl(out, policies):
+        policies = dbio.unpack_db(db_path, out, db_name, blobs, args.scope)
+        for stale in dbio.stale_jsonl(out, policies, args.scope):
             stale.unlink()
-        exported = sum(1 for p in policies.values() if pol.is_exported(p))
+        exported = sum(1 for p in policies.values()
+                       if pol.is_exported(p, args.scope))
         skipped = [n for n, p in policies.items() if p.mode == pol.LOCAL]
+        held = [n for n, p in policies.items()
+                if pol.is_exported(p) and not pol.is_exported(p, args.scope)]
         log("  unpacked %s: %d tables" % (db_name, exported))
         if skipped:
             log("    machine-local, not synced: %s" % ", ".join(sorted(skipped)))
+        if held:
+            log("    personal, held back from the team: %s" % ", ".join(sorted(held)))
 
-    written, redacted, veto = files.unpack_files(kirocrew_dir, files_dir, log)
+    written, redacted, veto = files.unpack_files(kirocrew_dir, files_dir, log,
+                                                 args.scope)
     log("  unpacked %d files" % len(written))
     for rel in veto[:10]:
         log("    excluded by a credential rule: %s" % rel)
@@ -61,12 +67,21 @@ def cmd_unpack(args):
         for entry in redacted[:10]:
             log("      %s" % entry)
 
+    held_files = files.withheld_for_scope(kirocrew_dir, args.scope)
+    if held_files:
+        log("  %d file(s) personal, held back from the team" % len(held_files))
+        for rel in held_files[:5]:
+            log("      %s" % rel)
+
     removed = blobs.sweep()
     if removed:
         log("  pruned %d unreferenced blob(s)" % removed)
 
     (repo / ".kcsync-format").write_text(str(FORMAT_VERSION) + "\n",
                                          encoding="utf-8")
+    # Read by the remote-compatibility gate: merging a personal repo into a
+    # team one would publish exactly what team scope holds back.
+    (repo / ".kcsync-scope").write_text(args.scope + "\n", encoding="utf-8")
     return 0
 
 
@@ -76,7 +91,7 @@ def cmd_pack(args):
     repo, db_dir, files_dir, blob_dir = _repo_paths(args.repo)
     blobs = BlobStore(blob_dir)
 
-    findings = gates.run_all(kirocrew_dir, repo)
+    findings = gates.run_all(kirocrew_dir, repo, args.scope)
     blocking = [m for level, m in findings if level == gates.ERROR]
     for level, message in findings:
         if level == gates.ERROR:
@@ -109,7 +124,8 @@ def cmd_pack(args):
             if not db_path.exists() or not source.exists():
                 continue
             stats = dbio.pack_db(db_path, source, db_name, blobs,
-                                 dry_run=args.dry_run, log=log)
+                                 dry_run=args.dry_run, log=log,
+                                 scope=args.scope)
             log("  packed %s: %d rows written, %d deleted"
                 % (db_name, stats["applied"], stats["deleted"]))
             if stats["orphans"]:
@@ -131,7 +147,8 @@ def cmd_pack(args):
         return 1
 
     applied = files.pack_files(files_dir, kirocrew_dir,
-                               dry_run=args.dry_run, log=log)
+                               dry_run=args.dry_run, log=log,
+                               scope=args.scope)
     log("  packed %d files" % applied)
 
     derived = [d for d in pol.DERIVED_DATABASES if (kirocrew_dir / d).exists()]
@@ -143,7 +160,8 @@ def cmd_pack(args):
 
 def cmd_gates(args):
     log = _log()
-    findings = gates.run_all(Path(args.kirocrew_dir), Path(args.repo))
+    findings = gates.run_all(Path(args.kirocrew_dir), Path(args.repo),
+                             args.scope)
     worst = 0
     for level, message in findings:
         if level == gates.ERROR:
@@ -163,7 +181,8 @@ def cmd_compat(args):
     """Pre-merge compatibility check against one remote machine's tree."""
     log = _log()
     findings = gates.check_compatibility(
-        Path(args.kirocrew_dir), Path(args.remote), args.label)
+        Path(args.kirocrew_dir), Path(args.remote), args.label, args.scope)
+    findings += gates.check_scope(args.scope, args.remote_scope, args.label)
     for level, message in findings:
         log("  %s: %s" % ("ERROR" if level == gates.ERROR else "WARN", message))
     return 2 if any(level == gates.ERROR for level, _ in findings) else 0
@@ -203,7 +222,7 @@ def cmd_doctor(args):
         if (kirocrew_dir / name).exists():
             log("  %-10s derived index, excluded from sync" % name)
 
-    syncable, veto, skipped_big = files.scan_tree(kirocrew_dir)
+    syncable, veto, skipped_big = files.scan_tree(kirocrew_dir, args.scope)
     total = sum((kirocrew_dir / r).stat().st_size for r in syncable)
     log("  %d files allowlisted (%.1f KB)" % (len(syncable), total / 1024.0))
 
@@ -279,6 +298,9 @@ def build_parser():
 
     def with_common(p, need_repo=True):
         p.add_argument("--kirocrew-dir", default=default_dir)
+        p.add_argument("--scope", choices=list(pol.SCOPES), default=pol.PERSONAL,
+                       help="personal (default) syncs everything syncable; "
+                            "team syncs only what is marked shared")
         if need_repo:
             p.add_argument("--repo", required=True)
         return p
@@ -299,8 +321,11 @@ def build_parser():
 
     p = sub.add_parser("compat", help="check a remote tree against local")
     p.add_argument("--kirocrew-dir", default=default_dir)
+    p.add_argument("--scope", choices=list(pol.SCOPES), default=pol.PERSONAL)
     p.add_argument("--remote", required=True,
                    help="directory holding the remote ref's db/ tree")
+    p.add_argument("--remote-scope", default=pol.PERSONAL,
+                   help="scope the remote machine published at")
     p.add_argument("--label", default="remote")
     p.set_defaults(func=cmd_compat)
 
