@@ -87,11 +87,45 @@ A user can:
 
 - ✅ Research completed (KiroCrew App platform understood)
 - ✅ Summary document created
-- 🔄 **Next**: Create detailed implementation plan
-- ⏳ Then: Build Python backend wrapper
-- ⏳ Then: Create dashboard UI components
-- ⏳ Then: Wire up notifications and crons
-- ⏳ Then: Test end-to-end
+- ✅ Implementation plan created
+- ✅ Phase 1: Foundation complete (app.json, database schema, models)
+- ✅ Phase 2: Backend complete (all managers, FastAPI server, 15 routes)
+- 🔄 **Next**: Phase 3 - UI components or test backend
+- ⏳ Then: Phase 4 - Polish and error handling
+- ⏳ Then: Phase 5 - End-to-end testing
+
+## What's Built So Far
+
+**Foundation** (Phase 1):
+- `app/app.json` - Complete manifest with crons, notifications, permissions
+- `app/backend/database.py` - SQLite schema (5 tables)
+- `app/backend/models.py` - 20+ Pydantic models
+- `app/backend/sync_manager.py` - Bash script wrapper
+
+**Backend API** (Phase 2):
+- `app/backend/history.py` - Sync history with pagination
+- `app/backend/conflicts.py` - Conflict resolution
+- `app/backend/quarantine.py` - Machine quarantine tracking
+- `app/backend/backends.py` - Backend config & testing
+- `app/backend/server.py` - FastAPI with 15 routes
+- `install-app.sh` - Installation script
+- `test_backend.py` - Backend validation tests
+
+**Routes Implemented**:
+- GET /status - current sync state
+- POST /sync - trigger manual sync
+- GET /history - sync timeline with pagination
+- GET /history/:id - detailed run information
+- GET /conflicts - unresolved conflicts
+- POST /conflicts/:id/resolve - resolve conflict
+- GET /quarantine - quarantined machines
+- POST /quarantine/:machine/clear - clear quarantine
+- GET /backends - available backends
+- POST /backends/test - test connection
+- POST /backends/switch - switch backend
+- GET /daemon/config - get daemon config
+- PUT /daemon/config - update daemon config
+- POST /daemon/control - start/stop/restart daemon
 
 ## Reference Documents
 
