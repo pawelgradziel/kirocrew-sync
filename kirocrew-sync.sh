@@ -54,6 +54,10 @@ fi
 # shellcheck source=/dev/null
 source "$BACKEND_FILE"
 
+# Source daemon implementation
+# shellcheck source=lib/daemon.sh
+source "$SCRIPT_DIR/lib/daemon.sh"
+
 # Path portability: knowledge-base paths are rewritten to a machine-independent
 # form on the way out and back to this machine's paths on the way in, so folder
 # sources keep working after a sync. Set SYNC_PORTABLE_PATHS=0 to sync URIs
@@ -663,6 +667,7 @@ Commands:
   push        Publish local state without merging
   pull        Sync, preferring remote changes on conflict
   resume      Finish a sync that stopped on conflicts
+  daemon      Run background sync (polls for changes, auto-syncs)
   status      Show pending changes and backend state
   doctor      Inspect local data and run preflight checks
   paths       Check whether knowledge source paths survive a sync
@@ -755,6 +760,7 @@ case "$COMMAND" in
     push)    cmd_push ;;
     pull)    cmd_pull ;;
     resume)  cmd_resume ;;
+    daemon)  cmd_daemon ;;
     status)  cmd_status ;;
     doctor)  cmd_doctor ;;
     paths)   cmd_paths ;;

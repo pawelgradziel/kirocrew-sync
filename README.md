@@ -342,15 +342,32 @@ merged, not overwritten.
 
 ### Automated Sync
 
-You can automate syncing with cron or by adding hooks to your shell profile:
+The recommended way is the **background daemon**, which polls intelligently and adapts to activity:
 
-**Option 1: Shell profile hook (automatic)**
+```bash
+# Test it first
+./kirocrew-sync.sh daemon
+
+# Then install as a service (see docs/daemon.md for full instructions):
+# Linux:   systemctl --user enable kirocrew-sync.service
+# macOS:   launchctl load ~/Library/LaunchAgents/com.kirocrew.sync.plist
+```
+
+The daemon handles both use cases:
+- **Personal**: switching between your own machines
+- **Team**: new knowledge from colleagues propagates automatically
+
+See **[docs/daemon.md](docs/daemon.md)** for installation and configuration.
+
+**Simpler alternatives** (less adaptive):
+
+**Option 1: Shell profile hook (sync before each KiroCrew launch)**
 ```bash
 # Add to ~/.bashrc or ~/.zshrc
 alias kirocrew='~/.kiro/crew/workspace/kirocrew-sync/kirocrew-sync.sh sync && command kirocrew'
 ```
 
-**Option 2: Cron job (scheduled)**
+**Option 2: Cron job (fixed schedule)**
 ```bash
 # Edit crontab
 crontab -e
@@ -629,7 +646,6 @@ Contributions welcome! Areas for improvement:
   [docs/backends/custom.md](docs/backends/custom.md)
 - End-to-end encryption before upload
 - Automatic schema migration instead of refusing on drift
-- Daemon mode with filesystem watching
 
 ## License
 

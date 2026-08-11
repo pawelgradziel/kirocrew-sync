@@ -1,0 +1,18 @@
+[Unit]
+Description=KiroCrew Sync - background synchronization
+Documentation=https://github.com/pawelgradziel/kirocrew-sync
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.kiro/crew/workspace/kirocrew-sync/kirocrew-sync.sh daemon
+Restart=on-failure
+RestartSec=60
+StandardOutput=journal
+StandardError=journal
+
+# Environment
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+
+[Install]
+WantedBy=default.target
