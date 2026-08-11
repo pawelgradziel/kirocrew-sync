@@ -1,0 +1,99 @@
+{
+  "name": "kirocrew-sync",
+  "version": "1.0.0",
+  "displayName": "Sync",
+  "description": "Synchronize KiroCrew data across machines with three-way merge. Keep knowledge, artifacts, and lessons consistent across your laptops and desktops, or share a knowledge library with your team.",
+  "author": "kirocrew-sync",
+  "tags": [
+    "sync",
+    "backup",
+    "knowledge",
+    "collaboration",
+    "multi-machine"
+  ],
+  "highlights": [
+    "Three-way merge: real bidirectional sync, per row, not per file",
+    "Background daemon with adaptive intervals (30s when active, 5min idle)",
+    "Dashboard page showing sync status, history, conflicts, and quarantine",
+    "Notification channels for conflicts, failures, and quarantine",
+    "Multiple backends: Google Drive, AWS S3, rsync, or local directory",
+    "Team scope for knowledge sharing without personal data"
+  ],
+  "defaultEnabled": false,
+  "iconUrl": "/app-assets/kirocrew-sync/icon.svg",
+  "permissions": {
+    "api": [
+      "/api/apps/kirocrew-sync",
+      "/api/apps/kirocrew-sync/*"
+    ],
+    "events": [
+      "notification"
+    ],
+    "mcpTools": [
+      "send_notification"
+    ],
+    "storage": true,
+    "network": true,
+    "cron": true
+  },
+  "ui": {
+    "pages": [
+      {
+        "route": "/kirocrew-sync",
+        "label": "Sync",
+        "icon": "RefreshCw"
+      }
+    ]
+  },
+  "backend": {
+    "entryPoint": "backend.server:app"
+  },
+  "crons": [
+    {
+      "name": "sync-daemon",
+      "every": 300,
+      "message": "Run sync via backend/sync_manager.py, store results in data/history.db, send notifications on conflicts/quarantine/failure. Skip if no changes detected (silent by design).",
+      "persistent_session": false,
+      "silent": true,
+      "enabled": true
+    }
+  ],
+  "notifications": {
+    "channels": [
+      {
+        "id": "sync-completed",
+        "name": "Sync completed",
+        "icon": "CheckCircle",
+        "defaultPriority": "passive"
+      },
+      {
+        "id": "conflict-detected",
+        "name": "Conflict detected",
+        "icon": "AlertTriangle",
+        "defaultPriority": "medium"
+      },
+      {
+        "id": "quarantine",
+        "name": "Machine quarantined",
+        "icon": "ShieldAlert",
+        "defaultPriority": "critical"
+      },
+      {
+        "id": "sync-failed",
+        "name": "Sync failed",
+        "icon": "XCircle",
+        "defaultPriority": "critical"
+      }
+    ]
+  },
+  "dependencies": {
+    "commands": [
+      "git"
+    ],
+    "optionalCommands": [
+      "rclone",
+      "aws",
+      "rsync"
+    ]
+  }
+}
