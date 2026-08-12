@@ -1,0 +1,19 @@
+{
+  "name": "kirocrew-sync-ui",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Dashboard UI bundle for the Crew Sync KiroCrew app. Built with esbuild into dist/index.mjs, which is what ships (and is committed) — this package.json and node_modules are dev-only and never installed on a target machine.",
+  "type": "module",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "typescript": "^5.6.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "lucide-react": "1.7.0",
+    "@tanstack/react-query": "5.96.0"
+  }
+}

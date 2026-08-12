@@ -1,10 +1,9 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Card, CardHeader, CardContent } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { CheckCircle, XCircle, AlertTriangle, Clock, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
-import { formatDistanceToNow, format } from 'date-fns';
+import { Card, Btn, Badge, EmptyState } from '@kirocrew/ui';
+import { CheckCircle, XCircle, AlertTriangle, Clock, ChevronDown, ChevronRight, History } from 'lucide-react';
+import { CodePill, ErrorBlock, LoadingBlock } from './shared';
+import { formatRelativeTime, formatDateTime } from '../lib/time';
 
 interface SyncRun {
   id: number;
@@ -40,32 +39,12 @@ function RunChanges({ runId }: { runId: number }) {
     },
   });
 
-  if (isLoading) {
-    return (
-      <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
-        <Loader2 className="w-4 h-4 animate-spin" />
-        Loading changes...
-      </div>
-    );
-  }
-
-  if (isError) {
-    return (
-      <div className="py-2 space-y-2">
-        <p className="text-sm text-muted-foreground">Failed to load changes for this run</p>
-        <Button size="sm" variant="outline" onClick={() => refetch()}>
-          Retry
-        </Button>
-      </div>
-    );
-  }
+  if (isLoading) return <LoadingBlock label="Loading changes…" />;
+  if (isError) return <ErrorBlock label="Failed to load changes for this run" onRetry={() => refetch()} />;
 
   const changes = data?.changes || [];
-
   if (changes.length === 0) {
-    return (
-      <p className="text-sm text-muted-foreground py-2">No detailed changes recorded for this run</p>
-    );
+    return <p className="text-sm text-muted py-2">No detailed changes recorded for this run</p>;
   }
 
   return (
@@ -75,12 +54,10 @@ function RunChanges({ runId }: { runId: number }) {
           key={index}
           className="flex items-start gap-2 text-sm border-b border-border last:border-0 pb-2 last:pb-0"
         >
-          <Badge variant="outline">{change.change_type}</Badge>
-          <Badge variant="outline">{change.action}</Badge>
-          {change.item_id && (
-            <code className="text-xs bg-muted px-1 py-0.5 rounded">{change.item_id}</code>
-          )}
-          {change.details && <span className="text-muted-foreground">{change.details}</span>}
+          <Badge variant="muted">{change.change_type}</Badge>
+          <Badge variant="muted">{change.action}</Badge>
+          {change.item_id && <CodePill>{change.item_id}</CodePill>}
+          {change.details && <span className="text-muted">{change.details}</span>}
         </div>
       ))}
     </div>
@@ -91,74 +68,61 @@ function HistoryRunCard({ run }: { run: SyncRun }) {
   const [expanded, setExpanded] = useState(false);
 
   const Icon = run.exit_code === 0 ? CheckCircle : run.exit_code === 3 ? AlertTriangle : XCircle;
-  const iconColor =
-    run.exit_code === 0
-      ? 'text-green-500'
-      : run.exit_code === 3
-      ? 'text-yellow-500'
-      : 'text-red-500';
+  const iconColor = run.exit_code === 0 ? 'text-ok' : run.exit_code === 3 ? 'text-warn' : 'text-danger';
 
   return (
     <Card>
-      <CardHeader className="pb-3">
-        <button
-          type="button"
-          className="flex items-start justify-between w-full text-left"
-          onClick={() => setExpanded((prev) => !prev)}
-          aria-expanded={expanded}
-        >
-          <div className="flex items-center gap-2">
-            {expanded ? (
-              <ChevronDown className="w-4 h-4 shrink-0 text-muted-foreground" />
-            ) : (
-              <ChevronRight className="w-4 h-4 shrink-0 text-muted-foreground" />
-            )}
-            <Icon className={`w-5 h-5 ${iconColor}`} />
-            <div>
-              <p className="text-sm font-medium">
-                {format(new Date(run.timestamp), 'MMM d, yyyy HH:mm:ss')}
-              </p>
-              <p className="text-xs text-muted-foreground">
-                {formatDistanceToNow(new Date(run.timestamp), { addSuffix: true })}
-              </p>
-            </div>
+      <button
+        type="button"
+        className="flex items-start justify-between w-full text-left bg-transparent border-none p-0 cursor-pointer"
+        onClick={() => setExpanded((prev) => !prev)}
+        aria-expanded={expanded}
+      >
+        <div className="flex items-center gap-2">
+          {expanded ? (
+            <ChevronDown size={16} className="shrink-0 text-muted" />
+          ) : (
+            <ChevronRight size={16} className="shrink-0 text-muted" />
+          )}
+          <Icon size={18} className={iconColor} />
+          <div>
+            <p className="text-sm font-medium text-text">{formatDateTime(run.timestamp)}</p>
+            <p className="text-xs text-muted">{formatRelativeTime(run.timestamp)}</p>
           </div>
-          <div className="flex items-center gap-2">
-            <Badge variant="outline">{run.scope}</Badge>
-            <Badge variant="outline">
-              <Clock className="w-3 h-3 mr-1" />
-              {run.duration_ms == null ? '—' : `${(run.duration_ms / 1000).toFixed(1)}s`}
-            </Badge>
-          </div>
-        </button>
-      </CardHeader>
+        </div>
+        <div className="flex items-center gap-2">
+          <Badge variant="muted">{run.scope}</Badge>
+          <Badge variant="muted">
+            <Clock size={12} />
+            {run.duration_ms == null ? '—' : `${(run.duration_ms / 1000).toFixed(1)}s`}
+          </Badge>
+        </div>
+      </button>
 
       {run.changes_detected && (
-        <CardContent className="pt-0">
-          <div className="flex flex-wrap gap-4 text-sm">
-            {run.rows_merged > 0 && (
-              <span className="text-muted-foreground">
-                {run.rows_merged} row{run.rows_merged > 1 ? 's' : ''} merged
-              </span>
-            )}
-            {run.conflicts_count > 0 && (
-              <span className="text-yellow-600 dark:text-yellow-400">
-                {run.conflicts_count} conflict{run.conflicts_count > 1 ? 's' : ''}
-              </span>
-            )}
-            {run.quarantine_count > 0 && (
-              <span className="text-orange-600 dark:text-orange-400">
-                {run.quarantine_count} machine{run.quarantine_count > 1 ? 's' : ''} quarantined
-              </span>
-            )}
-          </div>
-        </CardContent>
+        <div className="flex flex-wrap gap-4 text-sm mt-3">
+          {run.rows_merged > 0 && (
+            <span className="text-muted">
+              {run.rows_merged} row{run.rows_merged > 1 ? 's' : ''} merged
+            </span>
+          )}
+          {run.conflicts_count > 0 && (
+            <span className="text-warn">
+              {run.conflicts_count} conflict{run.conflicts_count > 1 ? 's' : ''}
+            </span>
+          )}
+          {run.quarantine_count > 0 && (
+            <span className="text-danger">
+              {run.quarantine_count} machine{run.quarantine_count > 1 ? 's' : ''} quarantined
+            </span>
+          )}
+        </div>
       )}
 
       {expanded && (
-        <CardContent className="pt-0 border-t border-border">
+        <div className="mt-3 pt-3 border-t border-border">
           <RunChanges runId={run.id} />
-        </CardContent>
+        </div>
       )}
     </Card>
   );
@@ -177,9 +141,7 @@ export function HistoryTimeline() {
   if (isLoading) {
     return (
       <Card>
-        <CardContent className="py-8 text-center">
-          <p className="text-sm text-muted-foreground">Loading history...</p>
-        </CardContent>
+        <LoadingBlock label="Loading history…" />
       </Card>
     );
   }
@@ -187,12 +149,7 @@ export function HistoryTimeline() {
   if (isError) {
     return (
       <Card>
-        <CardContent className="py-8 text-center space-y-3">
-          <p className="text-sm text-muted-foreground">Failed to load sync history</p>
-          <Button size="sm" variant="outline" onClick={() => refetch()}>
-            Retry
-          </Button>
-        </CardContent>
+        <ErrorBlock label="Failed to load sync history" onRetry={() => refetch()} />
       </Card>
     );
   }
@@ -202,9 +159,7 @@ export function HistoryTimeline() {
   if (runs.length === 0) {
     return (
       <Card>
-        <CardContent className="py-8 text-center">
-          <p className="text-sm text-muted-foreground">No sync history yet</p>
-        </CardContent>
+        <EmptyState icon={<History size={40} />} title="No sync history yet" />
       </Card>
     );
   }
@@ -216,9 +171,7 @@ export function HistoryTimeline() {
       ))}
 
       {data && data.total > 50 && (
-        <p className="text-sm text-muted-foreground text-center">
-          Showing 50 of {data.total} syncs
-        </p>
+        <p className="text-sm text-muted text-center">Showing 50 of {data.total} syncs</p>
       )}
     </div>
   );

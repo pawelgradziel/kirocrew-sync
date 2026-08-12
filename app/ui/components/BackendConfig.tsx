@@ -1,11 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Card, CardHeader, CardContent } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { Label } from '@/components/ui/label';
-import { Input } from '@/components/ui/input';
-import { CheckCircle, XCircle, AlertTriangle, Loader2, ChevronDown, ChevronRight } from 'lucide-react';
+import { Card, CardTitle, Btn, Badge, Input, EmptyState } from '@kirocrew/ui';
+import { CheckCircle, AlertTriangle, Loader2, ChevronDown, ChevronRight, Server } from 'lucide-react';
+import { CodePill, ErrorBlock, LoadingBlock, Message } from './shared';
 
 type BackendName = 'gdrive' | 's3' | 'rsync' | 'local';
 
@@ -86,12 +83,7 @@ function BackendConfigForm({ backend }: { backend: BackendName }) {
     null
   );
 
-  const {
-    data,
-    isLoading,
-    isError,
-    refetch,
-  } = useQuery<BackendConfigStatus>({
+  const { data, isLoading, isError, refetch } = useQuery<BackendConfigStatus>({
     queryKey: ['backend-config', backend],
     queryFn: () => fetchBackendConfig(backend),
   });
@@ -128,25 +120,8 @@ function BackendConfigForm({ backend }: { backend: BackendName }) {
     },
   });
 
-  if (isLoading) {
-    return (
-      <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
-        <Loader2 className="w-4 h-4 animate-spin" />
-        Loading configuration...
-      </div>
-    );
-  }
-
-  if (isError || !data) {
-    return (
-      <div className="space-y-2 py-2">
-        <p className="text-sm text-muted-foreground">Failed to load configuration</p>
-        <Button size="sm" variant="outline" onClick={() => refetch()}>
-          Retry
-        </Button>
-      </div>
-    );
-  }
+  if (isLoading) return <LoadingBlock label="Loading configuration…" />;
+  if (isError || !data) return <ErrorBlock label="Failed to load configuration" onRetry={() => refetch()} />;
 
   const dirtyEntries = Object.entries(values).filter(
     ([key, value]) => value !== (initialValues[key] ?? '')
@@ -159,68 +134,43 @@ function BackendConfigForm({ backend }: { backend: BackendName }) {
   };
 
   return (
-    <div className="space-y-3 pt-3 mt-1 border-t">
+    <div className="space-y-3 pt-3 mt-3 border-t border-border">
       {data.fields.map((field) => (
         <div key={field.key} className="space-y-1">
           <div className="flex items-center justify-between gap-2 flex-wrap">
-            <Label htmlFor={`${backend}-${field.key}`} className="text-xs font-medium">
+            <label htmlFor={`${backend}-${field.key}`} className="text-xs font-medium text-text">
               {field.key}
-              {field.required && <span className="text-red-500 ml-0.5">*</span>}
-            </Label>
-            <span className="text-xs text-muted-foreground">{sourceLabel(field)}</span>
+              {field.required && <span className="text-danger ml-0.5">*</span>}
+            </label>
+            <span className="text-xs text-muted">{sourceLabel(field)}</span>
           </div>
           <Input
             id={`${backend}-${field.key}`}
             value={values[field.key] ?? ''}
             placeholder={field.required ? 'Required, no default' : undefined}
             disabled={saveConfig.isPending}
-            onChange={(e) =>
-              setValues((prev) => ({ ...prev, [field.key]: e.target.value }))
-            }
-            className="h-8 text-sm"
+            onChange={(e) => setValues((prev) => ({ ...prev, [field.key]: e.target.value }))}
+            className="w-full"
           />
         </div>
       ))}
 
       {data.fields.some((f) => f.required) && (
-        <p className="text-xs text-muted-foreground">* required for this backend to work</p>
+        <p className="text-xs text-muted">* required for this backend to work</p>
       )}
 
-      {saveMessage && (
-        <div
-          className={
-            saveMessage.type === 'success'
-              ? 'p-2 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-md'
-              : 'p-2 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md'
-          }
-        >
-          <p
-            className={
-              saveMessage.type === 'success'
-                ? 'text-sm text-green-800 dark:text-green-200 flex items-center gap-1'
-                : 'text-sm text-red-800 dark:text-red-200 flex items-center gap-1'
-            }
-          >
-            {saveMessage.type === 'success' ? (
-              <CheckCircle className="w-4 h-4 shrink-0" />
-            ) : (
-              <XCircle className="w-4 h-4 shrink-0" />
-            )}
-            {saveMessage.text}
-          </p>
-        </div>
-      )}
+      {saveMessage && <Message tone={saveMessage.type}>{saveMessage.text}</Message>}
 
-      <Button size="sm" onClick={handleSave} disabled={!hasChanges || saveConfig.isPending}>
+      <Btn primary onClick={handleSave} disabled={!hasChanges || saveConfig.isPending}>
         {saveConfig.isPending ? (
           <>
-            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-            Saving...
+            <Loader2 size={14} className="animate-spin" />
+            Saving…
           </>
         ) : (
           'Save configuration'
         )}
-      </Button>
+      </Btn>
     </div>
   );
 }
@@ -230,12 +180,7 @@ export function BackendConfig() {
   const [testResults, setTestResults] = useState<Record<string, BackendTestResult>>({});
   const [expanded, setExpanded] = useState<Set<BackendName>>(new Set());
 
-  const {
-    data,
-    isLoading,
-    isError,
-    refetch,
-  } = useQuery<BackendsResponse>({
+  const { data, isLoading, isError, refetch } = useQuery<BackendsResponse>({
     queryKey: ['backends'],
     queryFn: async () => {
       const response = await fetch('/api/apps/kirocrew-sync/backends');
@@ -296,12 +241,7 @@ export function BackendConfig() {
   if (isLoading) {
     return (
       <Card>
-        <CardContent className="py-8 text-center">
-          <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
-            <Loader2 className="w-4 h-4 animate-spin" />
-            Loading backends...
-          </div>
-        </CardContent>
+        <LoadingBlock label="Loading backends…" />
       </Card>
     );
   }
@@ -309,12 +249,7 @@ export function BackendConfig() {
   if (isError) {
     return (
       <Card>
-        <CardContent className="py-8 text-center space-y-3">
-          <p className="text-sm text-muted-foreground">Failed to load backends</p>
-          <Button size="sm" variant="outline" onClick={() => refetch()}>
-            Retry
-          </Button>
-        </CardContent>
+        <ErrorBlock label="Failed to load backends" onRetry={() => refetch()} />
       </Card>
     );
   }
@@ -324,16 +259,14 @@ export function BackendConfig() {
   if (backends.length === 0) {
     return (
       <Card>
-        <CardContent className="py-8 text-center">
-          <p className="text-sm text-muted-foreground">No backends available</p>
-        </CardContent>
+        <EmptyState icon={<Server size={40} />} title="No backends available" />
       </Card>
     );
   }
 
   return (
     <div className="space-y-4">
-      <h3 className="text-lg font-semibold">Storage Backend</h3>
+      <h3 className="text-sm font-semibold tracking-tight text-text-strong">Storage Backend</h3>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {backends.map((backend) => {
@@ -343,125 +276,82 @@ export function BackendConfig() {
           const isExpanded = expanded.has(backend.name);
 
           return (
-            <Card key={backend.name} className={backend.active ? 'border-primary' : undefined}>
-              <CardHeader>
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <h4 className="font-medium">{backend.display_name}</h4>
-                    <p className="text-sm text-muted-foreground">{backend.description}</p>
-                  </div>
-                  {backend.active && (
-                    <Badge className="bg-green-500 shrink-0">
-                      <CheckCircle className="w-3 h-3 mr-1" />
-                      Active
-                    </Badge>
-                  )}
+            <Card key={backend.name} className={backend.active ? 'border-accent' : undefined}>
+              <div className="flex items-start justify-between gap-2 mb-3">
+                <div className="min-w-0">
+                  <h4 className="font-medium text-text">{backend.display_name}</h4>
+                  <p className="text-sm text-muted">{backend.description}</p>
                 </div>
-              </CardHeader>
-
-              <CardContent className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <Badge variant={backend.configured ? 'outline' : 'destructive'}>
-                    {backend.configured ? 'Configured' : 'Not configured'}
+                {backend.active && (
+                  <Badge variant="ok">
+                    <CheckCircle size={12} />
+                    Active
                   </Badge>
-                </div>
+                )}
+              </div>
+
+              <div className="space-y-3">
+                <Badge variant={backend.configured ? 'muted' : 'err'}>
+                  {backend.configured ? 'Configured' : 'Not configured'}
+                </Badge>
 
                 {backend.requires_config.length > 0 && (
                   <div className="space-y-1">
-                    <p className="text-xs text-muted-foreground">Requires</p>
+                    <p className="text-xs text-muted">Requires</p>
                     <div className="flex flex-wrap gap-1">
                       {backend.requires_config.map((req) => (
-                        <code
-                          key={req}
-                          className="text-xs bg-muted px-1 py-0.5 rounded"
-                        >
-                          {req}
-                        </code>
+                        <CodePill key={req}>{req}</CodePill>
                       ))}
                     </div>
                   </div>
                 )}
 
-                {result && (
-                  <div
-                    className={
-                      result.success
-                        ? 'p-2 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-md'
-                        : 'p-2 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md'
-                    }
-                  >
-                    <p
-                      className={
-                        result.success
-                          ? 'text-sm text-green-800 dark:text-green-200 flex items-center gap-1'
-                          : 'text-sm text-red-800 dark:text-red-200 flex items-center gap-1'
-                      }
-                    >
-                      {result.success ? (
-                        <CheckCircle className="w-4 h-4 shrink-0" />
-                      ) : (
-                        <XCircle className="w-4 h-4 shrink-0" />
-                      )}
-                      {result.message}
-                    </p>
-                  </div>
-                )}
+                {result && <Message tone={result.success ? 'success' : 'error'}>{result.message}</Message>}
 
                 {!backend.configured && !result && (
-                  <p className="text-xs text-muted-foreground flex items-center gap-1">
-                    <AlertTriangle className="w-3 h-3 shrink-0" />
+                  <p className="text-xs text-muted flex items-center gap-1">
+                    <AlertTriangle size={12} className="shrink-0" />
                     Set up this backend before switching to it
                   </p>
                 )}
 
                 <div className="flex gap-2 flex-wrap">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => testBackend.mutate(backend.name)}
-                    disabled={isTesting}
-                  >
+                  <Btn onClick={() => testBackend.mutate(backend.name)} disabled={isTesting}>
                     {isTesting ? (
                       <>
-                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                        Testing...
+                        <Loader2 size={14} className="animate-spin" />
+                        Testing…
                       </>
                     ) : (
                       'Test Connection'
                     )}
-                  </Button>
-                  <Button
-                    size="sm"
+                  </Btn>
+                  <Btn
+                    primary
                     onClick={() => switchBackend.mutate(backend.name)}
                     disabled={backend.active || !backend.configured || isSwitching}
                   >
                     {isSwitching ? (
                       <>
-                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                        Switching...
+                        <Loader2 size={14} className="animate-spin" />
+                        Switching…
                       </>
                     ) : (
                       'Switch'
                     )}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
+                  </Btn>
+                  <Btn
                     onClick={() => toggleExpanded(backend.name)}
                     aria-expanded={isExpanded}
                     aria-label={isExpanded ? 'Hide configuration' : 'Configure'}
                   >
-                    {isExpanded ? (
-                      <ChevronDown className="w-4 h-4 mr-1" />
-                    ) : (
-                      <ChevronRight className="w-4 h-4 mr-1" />
-                    )}
+                    {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                     Configure
-                  </Button>
+                  </Btn>
                 </div>
 
                 {isExpanded && <BackendConfigForm backend={backend.name} />}
-              </CardContent>
+              </div>
             </Card>
           );
         })}

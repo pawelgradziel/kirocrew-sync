@@ -41,3 +41,9 @@ __pycache__/
 
 # Local dev virtualenv for the KiroCrew app backend
 .venv/
+
+# Node dev deps for the app/ui build (esbuild + type stubs). Never shipped —
+# install-app.sh copies the whole ui/ tree, so this must stay excluded or an
+# install would ship node_modules. app/ui/dist/index.mjs (the built bundle)
+# IS committed and is not covered by this.
+app/ui/node_modules/

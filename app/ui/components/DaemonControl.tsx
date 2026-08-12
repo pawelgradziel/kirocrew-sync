@@ -1,12 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
-import { Card, CardHeader, CardContent } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Label } from '@/components/ui/label';
-import { Switch } from '@/components/ui/switch';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Slider } from '@/components/ui/slider';
-import { CheckCircle, XCircle, RotateCw, Loader2 } from 'lucide-react';
+import { Card, CardTitle, Btn, Toggle } from '@kirocrew/ui';
+import { RotateCw, Loader2 } from 'lucide-react';
+import { ErrorBlock, Message } from './shared';
 
 interface DaemonConfig {
   enabled: boolean;
@@ -40,12 +36,7 @@ export function DaemonControl() {
   // isn't fought by the server round-trip - only persisted on commit.
   const [intervalValue, setIntervalValue] = useState<number | null>(null);
 
-  const {
-    data,
-    isLoading,
-    isError,
-    refetch,
-  } = useQuery<DaemonConfig>({
+  const { data, isLoading, isError, refetch } = useQuery<DaemonConfig>({
     queryKey: ['daemon-config'],
     queryFn: async () => {
       const response = await fetch('/api/apps/kirocrew-sync/daemon/config');
@@ -115,15 +106,11 @@ export function DaemonControl() {
   if (isLoading) {
     return (
       <Card>
-        <CardHeader>
-          <h3 className="text-lg font-semibold">Daemon Control</h3>
-        </CardHeader>
-        <CardContent className="py-8 text-center">
-          <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
-            <Loader2 className="w-4 h-4 animate-spin" />
-            Loading daemon status...
-          </div>
-        </CardContent>
+        <CardTitle>Daemon Control</CardTitle>
+        <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted">
+          <Loader2 size={16} className="animate-spin" />
+          Loading daemon status…
+        </div>
       </Card>
     );
   }
@@ -131,15 +118,8 @@ export function DaemonControl() {
   if (isError || !data) {
     return (
       <Card>
-        <CardHeader>
-          <h3 className="text-lg font-semibold">Daemon Control</h3>
-        </CardHeader>
-        <CardContent className="py-8 text-center space-y-3">
-          <p className="text-sm text-muted-foreground">Failed to load daemon status</p>
-          <Button size="sm" variant="outline" onClick={() => refetch()}>
-            Retry
-          </Button>
-        </CardContent>
+        <CardTitle>Daemon Control</CardTitle>
+        <ErrorBlock label="Failed to load daemon status" onRetry={() => refetch()} />
       </Card>
     );
   }
@@ -148,85 +128,49 @@ export function DaemonControl() {
 
   return (
     <Card>
-      <CardHeader>
-        <h3 className="text-lg font-semibold">Daemon Control</h3>
-      </CardHeader>
+      <CardTitle>Daemon Control</CardTitle>
 
-      <CardContent className="space-y-6">
+      <div className="space-y-6">
         <div className="flex items-center justify-between">
-          <Label htmlFor="daemon-enabled" className="text-sm font-medium">
-            Background sync
-          </Label>
-          <Switch
-            id="daemon-enabled"
+          <span className="text-sm font-medium text-text">Background sync</span>
+          <Toggle
             checked={data.enabled}
             disabled={isBusy}
-            onCheckedChange={(enabled) => toggleBackgroundSync.mutate(enabled)}
+            onChange={(enabled) => toggleBackgroundSync.mutate(enabled)}
+            label="Background sync"
           />
         </div>
 
-        {controlMessage && (
-          <div
-            className={
-              controlMessage.type === 'success'
-                ? 'p-2 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-md'
-                : 'p-2 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md'
-            }
-          >
-            <p
-              className={
-                controlMessage.type === 'success'
-                  ? 'text-sm text-green-800 dark:text-green-200 flex items-center gap-1'
-                  : 'text-sm text-red-800 dark:text-red-200 flex items-center gap-1'
-              }
-            >
-              {controlMessage.type === 'success' ? (
-                <CheckCircle className="w-4 h-4 shrink-0" />
-              ) : (
-                <XCircle className="w-4 h-4 shrink-0" />
-              )}
-              {controlMessage.text}
-            </p>
-          </div>
-        )}
+        {controlMessage && <Message tone={controlMessage.type}>{controlMessage.text}</Message>}
 
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => restartDaemon.mutate()}
-          disabled={isBusy}
-          className="w-full"
-        >
+        <Btn onClick={() => restartDaemon.mutate()} disabled={isBusy} className="w-full justify-center">
           {restartDaemon.isPending ? (
             <>
-              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-              Restarting...
+              <Loader2 size={14} className="animate-spin" />
+              Restarting…
             </>
           ) : (
             <>
-              <RotateCw className="w-4 h-4 mr-2" />
+              <RotateCw size={14} />
               Restart daemon
             </>
           )}
-        </Button>
+        </Btn>
 
         <div className="space-y-2">
-          <Label htmlFor="sync-scope" className="text-sm font-medium">
+          <label htmlFor="sync-scope" className="text-sm font-medium text-text">
             Scope
-          </Label>
-          <Select
+          </label>
+          <select
+            id="sync-scope"
             value={data.scope}
-            onValueChange={(scope: 'personal' | 'team') => updateConfig.mutate({ scope })}
+            onChange={(e) => updateConfig.mutate({ scope: e.target.value as 'personal' | 'team' })}
+            className="w-full bg-bg-elevated border border-border rounded-md px-3 py-2 text-text text-sm outline-none"
           >
-            <SelectTrigger id="sync-scope">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="personal">Personal</SelectItem>
-              <SelectItem value="team">Team</SelectItem>
-            </SelectContent>
-          </Select>
-          <p className="text-xs text-muted-foreground">
+            <option value="personal">Personal</option>
+            <option value="team">Team</option>
+          </select>
+          <p className="text-xs text-muted">
             {data.scope === 'personal'
               ? 'Sync all data across your own machines'
               : 'Share knowledge with your team (excludes transcripts)'}
@@ -235,28 +179,42 @@ export function DaemonControl() {
 
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <Label htmlFor="sync-interval" className="text-sm font-medium">
+            <label htmlFor="sync-interval" className="text-sm font-medium text-text">
               Interval
-            </Label>
-            <span className="text-sm text-muted-foreground">
+            </label>
+            <span className="text-sm text-muted">
               {Math.floor((intervalValue ?? data.interval) / 60)} minutes
             </span>
           </div>
-          <Slider
+          <input
             id="sync-interval"
+            type="range"
             min={60}
             max={900}
             step={60}
-            value={[intervalValue ?? data.interval]}
-            onValueChange={([interval]) => setIntervalValue(interval)}
-            onValueCommit={([interval]) => updateConfig.mutate({ interval })}
+            value={intervalValue ?? data.interval}
+            onChange={(e) => setIntervalValue(Number(e.target.value))}
+            // A native <input type="range"> fires React's onChange (mapped to
+            // the DOM 'input' event) continuously while dragging - that's what
+            // keeps the label live - but never fires anything on release by
+            // itself. The Radix Slider this replaced had a separate
+            // onValueCommit for that; here it's reconstructed from every way a
+            // "release" can happen: pointer up, touch end, AND keyup (arrow-key
+            // / Home / End users never fire mouseup/touchend at all).
+            onMouseUp={() => {
+              if (intervalValue != null) updateConfig.mutate({ interval: intervalValue });
+            }}
+            onTouchEnd={() => {
+              if (intervalValue != null) updateConfig.mutate({ interval: intervalValue });
+            }}
+            onKeyUp={() => {
+              if (intervalValue != null) updateConfig.mutate({ interval: intervalValue });
+            }}
             className="w-full"
           />
-          <p className="text-xs text-muted-foreground">
-            How often to check for changes (1-15 minutes)
-          </p>
+          <p className="text-xs text-muted">How often to check for changes (1-15 minutes)</p>
         </div>
-      </CardContent>
+      </div>
     </Card>
   );
 }

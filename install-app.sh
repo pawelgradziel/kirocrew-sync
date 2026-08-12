@@ -97,13 +97,20 @@ APP_DEST_DIR="$KIROCREW_HOME/apps/$APP_NAME"
 
 usage() {
     cat <<EOF
-Usage: $(basename "${BASH_SOURCE[0]}") [--uninstall|--help]
+Usage: $(basename "${BASH_SOURCE[0]}") [--uninstall|--provision-venv|--help]
 
-  (no args)     Install or update the app at $APP_DEST_DIR
-                Prefers a reachable KiroCrew gateway's install API; falls
-                back to staging files + metadata offline otherwise.
-  --uninstall   Remove the app (does not touch $SYNC_DIR)
-  --help        Show this help
+  (no args)          Install or update the app at $APP_DEST_DIR
+                     Prefers a reachable KiroCrew gateway's install API;
+                     falls back to staging files + metadata offline.
+  --provision-venv   Rebuild only the app's Python virtualenv, in place.
+                     Use this after the dashboard's own "Sync" button:
+                     KiroCrew's re-install preserves data/ but deletes
+                     everything else in the app directory, including
+                     .venv — and its bundled interpreter has no fastapi,
+                     so the backend dies on the next spawn until the
+                     virtualenv is rebuilt. Touches nothing else.
+  --uninstall        Remove the app (does not touch $SYNC_DIR)
+  --help             Show this help
 
 Env overrides: KIROCREW_HOME (default ~/.kiro/crew), KIROCREW_PORT (default
 5476) — both match the names KiroCrew itself honors.
@@ -142,6 +149,18 @@ check_prerequisites() {
             missing=1
         fi
     done
+
+    # The dashboard ships as a prebuilt ESM bundle (app.json's ui.entry ->
+    # ui/dist/index.mjs) rather than a build step run on the target machine,
+    # so it's committed to the repo like any other app source file. If it's
+    # missing, the app would install "successfully" but its dashboard page
+    # would silently show a "failed to load" error in KiroCrew — fail here
+    # instead, where the cause is obvious.
+    if [ ! -e "$APP_SRC_DIR/ui/dist/index.mjs" ]; then
+        log_error "Expected built UI bundle missing: $APP_SRC_DIR/ui/dist/index.mjs"
+        log_error "Build it with: cd app/ui && npm install && npm run build"
+        missing=1
+    fi
 
     if [ "$missing" -ne 0 ]; then
         echo
@@ -367,7 +386,15 @@ do_offline_install() {
     log_info "Copying app files..."
     cp "$APP_SRC_DIR/app.json" "$APP_DEST_DIR/"
     cp -r "$APP_SRC_DIR/backend"/. "$APP_DEST_DIR/backend/"
+    # Copies the whole ui/ tree, including the committed built bundle at
+    # ui/dist/index.mjs (what app.json's ui.entry points at) — the app ships
+    # with no build step on the target machine, so that file must already be
+    # in the source tree. ui/node_modules is dev-only (esbuild + type stubs
+    # for building the bundle) and is removed right after: if a developer
+    # happened to run `npm install` in app/ui locally before invoking this
+    # script, `cp -r` would otherwise copy it wholesale into the install.
     cp -r "$APP_SRC_DIR/ui"/. "$APP_DEST_DIR/ui/"
+    rm -rf "$APP_DEST_DIR/ui/node_modules"
     if [ -f "$APP_SRC_DIR/requirements.txt" ]; then
         cp "$APP_SRC_DIR/requirements.txt" "$APP_DEST_DIR/"
     fi
@@ -572,6 +599,21 @@ case "$MODE" in
         ;;
     --uninstall)
         do_uninstall
+        ;;
+    --provision-venv)
+        if [ ! -d "$APP_DEST_DIR" ]; then
+            log_error "App is not installed at $APP_DEST_DIR"
+            log_info "Run this script with no arguments to install it first."
+            exit 1
+        fi
+        if provision_venv "$APP_DEST_DIR"; then
+            echo
+            log_success "Virtualenv rebuilt"
+            log_info "Restart the app so the gateway respawns its backend:"
+            log_info "  Apps → Crew Sync → Disable, then Enable"
+        else
+            exit 1
+        fi
         ;;
     -h|--help)
         usage

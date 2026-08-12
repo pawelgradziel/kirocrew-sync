@@ -1,7 +1,7 @@
 {
   "name": "kirocrew-sync",
-  "version": "1.0.0",
-  "displayName": "Sync",
+  "version": "0.0.1",
+  "displayName": "Crew Sync",
   "description": "Synchronize KiroCrew data across machines with three-way merge. Keep knowledge, artifacts, and lessons consistent across your laptops and desktops, or share a knowledge library with your team.",
   "author": "kirocrew-sync",
   "tags": [
@@ -38,10 +38,11 @@
     "cron": true
   },
   "ui": {
+    "entry": "dist/index.mjs",
     "pages": [
       {
         "route": "/kirocrew-sync",
-        "label": "Sync",
+        "label": "Crew Sync",
         "icon": "RefreshCw"
       }
     ]

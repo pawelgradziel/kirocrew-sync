@@ -1,10 +1,9 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Card, CardHeader, CardContent, CardFooter } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { RefreshCw, CheckCircle, AlertTriangle, XCircle, Loader2 } from 'lucide-react';
-import { formatDistanceToNow } from 'date-fns';
+import { Card, CardTitle, Btn, Badge } from '@kirocrew/ui';
+import { RefreshCw, CheckCircle, AlertTriangle, XCircle, ShieldAlert, Loader2 } from 'lucide-react';
+import { Message } from './shared';
+import { formatRelativeTime } from '../lib/time';
 
 interface SyncStatus {
   state: 'idle' | 'syncing' | 'conflict' | 'failed' | 'quarantine';
@@ -16,25 +15,25 @@ interface SyncStatus {
   conflicts_pending: number;
 }
 
-const stateIcons = {
+const STATE_ICON: Record<SyncStatus['state'], typeof CheckCircle> = {
   idle: CheckCircle,
   syncing: Loader2,
   conflict: AlertTriangle,
   failed: XCircle,
-  quarantine: AlertTriangle,
+  quarantine: ShieldAlert,
 };
 
-const stateColors = {
-  idle: 'bg-green-500',
-  syncing: 'bg-blue-500',
-  conflict: 'bg-yellow-500',
-  failed: 'bg-red-500',
-  quarantine: 'bg-orange-500',
+const STATE_VARIANT: Record<SyncStatus['state'], 'ok' | 'err' | 'warn' | 'aim'> = {
+  idle: 'ok',
+  syncing: 'aim',
+  conflict: 'warn',
+  failed: 'err',
+  quarantine: 'err',
 };
 
-const stateLabels = {
+const STATE_LABEL: Record<SyncStatus['state'], string> = {
   idle: 'Up to date',
-  syncing: 'Syncing...',
+  syncing: 'Syncing…',
   conflict: 'Conflicts',
   failed: 'Failed',
   quarantine: 'Quarantine',
@@ -76,9 +75,7 @@ export function StatusWidget() {
         return;
       }
 
-      setSyncMessage(
-        result.message ? { type: 'success', text: result.message } : null
-      );
+      setSyncMessage(result.message ? { type: 'success', text: result.message } : null);
       refetch();
       queryClient.invalidateQueries({ queryKey: ['sync-history'] });
       queryClient.invalidateQueries({ queryKey: ['conflicts'] });
@@ -90,131 +87,93 @@ export function StatusWidget() {
   });
 
   const status = data?.status;
-  const StateIcon = status ? stateIcons[status.state] : CheckCircle;
-  const stateColor = status ? stateColors[status.state] : 'bg-gray-500';
-  const stateLabel = status ? stateLabels[status.state] : 'Unknown';
+  const StateIcon = status ? STATE_ICON[status.state] : CheckCircle;
 
   return (
     <Card>
-      <CardHeader>
-        <div className="flex items-center justify-between">
-          <h3 className="text-lg font-semibold">Sync Status</h3>
-          {status && (
-            <Badge className={stateColor}>
-              <StateIcon className="w-3 h-3 mr-1" />
-              {stateLabel}
-            </Badge>
-          )}
+      <div className="flex items-center justify-between mb-4">
+        <CardTitle className="mb-0">Sync Status</CardTitle>
+        {status && (
+          <Badge variant={STATE_VARIANT[status.state]}>
+            <StateIcon size={12} className={status.state === 'syncing' ? 'animate-spin' : undefined} />
+            {STATE_LABEL[status.state]}
+          </Badge>
+        )}
+      </div>
+
+      {isLoading ? (
+        <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted">
+          <Loader2 size={16} className="animate-spin" />
+          Loading status…
         </div>
-      </CardHeader>
-
-      <CardContent className="space-y-4">
-        {isLoading ? (
-          <div className="flex items-center justify-center py-8">
-            <Loader2 className="w-6 h-6 animate-spin" />
+      ) : status ? (
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <p className="text-xs text-muted mb-1">Last sync</p>
+              <p className="text-sm font-medium text-text">
+                {status.last_sync ? formatRelativeTime(status.last_sync) : 'Never'}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-muted mb-1">Next sync</p>
+              <p className="text-sm font-medium text-text">
+                {status.next_sync ? formatRelativeTime(status.next_sync) : 'Not scheduled'}
+              </p>
+            </div>
           </div>
-        ) : status ? (
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <p className="text-xs text-muted mb-1">Scope</p>
+              <Badge variant="muted">{status.scope}</Badge>
+            </div>
+            <div>
+              <p className="text-xs text-muted mb-1">Machines</p>
+              <p className="text-sm font-medium text-text">
+                {status.machines_active} active
+                {status.machines_quarantined > 0 && (
+                  <span className="text-warn"> / {status.machines_quarantined} quarantined</span>
+                )}
+              </p>
+            </div>
+          </div>
+
+          {status.conflicts_pending > 0 && (
+            <div className="bg-warn-subtle text-warn rounded-md p-3 flex items-center gap-2 text-sm">
+              <AlertTriangle size={14} className="shrink-0" />
+              {status.conflicts_pending} conflict{status.conflicts_pending > 1 ? 's' : ''} need
+              resolution
+            </div>
+          )}
+
+          {syncMessage && <Message tone={syncMessage.type}>{syncMessage.text}</Message>}
+        </div>
+      ) : (
+        <p className="text-sm text-muted">Failed to load status</p>
+      )}
+
+      <Btn
+        primary
+        onClick={() => {
+          setSyncMessage(null);
+          triggerSync.mutate();
+        }}
+        disabled={triggerSync.isPending || status?.state === 'syncing'}
+        className="w-full justify-center mt-4"
+      >
+        {triggerSync.isPending ? (
           <>
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <p className="text-sm text-muted-foreground">Last sync</p>
-                <p className="text-sm font-medium">
-                  {status.last_sync
-                    ? formatDistanceToNow(new Date(status.last_sync), { addSuffix: true })
-                    : 'Never'}
-                </p>
-              </div>
-              <div>
-                <p className="text-sm text-muted-foreground">Next sync</p>
-                <p className="text-sm font-medium">
-                  {status.next_sync
-                    ? formatDistanceToNow(new Date(status.next_sync), { addSuffix: true })
-                    : 'Not scheduled'}
-                </p>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <p className="text-sm text-muted-foreground">Scope</p>
-                <Badge variant="outline">{status.scope}</Badge>
-              </div>
-              <div>
-                <p className="text-sm text-muted-foreground">Machines</p>
-                <p className="text-sm font-medium">
-                  {status.machines_active} active
-                  {status.machines_quarantined > 0 && (
-                    <span className="text-orange-500">
-                      {' '}
-                      / {status.machines_quarantined} quarantined
-                    </span>
-                  )}
-                </p>
-              </div>
-            </div>
-
-            {status.conflicts_pending > 0 && (
-              <div className="p-3 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-md">
-                <p className="text-sm text-yellow-800 dark:text-yellow-200">
-                  <AlertTriangle className="w-4 h-4 inline mr-1" />
-                  {status.conflicts_pending} conflict{status.conflicts_pending > 1 ? 's' : ''} need
-                  resolution
-                </p>
-              </div>
-            )}
-
-            {syncMessage && (
-              <div
-                className={
-                  syncMessage.type === 'success'
-                    ? 'p-2 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-md'
-                    : 'p-2 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md'
-                }
-              >
-                <p
-                  className={
-                    syncMessage.type === 'success'
-                      ? 'text-sm text-green-800 dark:text-green-200 flex items-center gap-1'
-                      : 'text-sm text-red-800 dark:text-red-200 flex items-center gap-1'
-                  }
-                >
-                  {syncMessage.type === 'success' ? (
-                    <CheckCircle className="w-4 h-4 shrink-0" />
-                  ) : (
-                    <XCircle className="w-4 h-4 shrink-0" />
-                  )}
-                  {syncMessage.text}
-                </p>
-              </div>
-            )}
+            <Loader2 size={14} className="animate-spin" />
+            Syncing…
           </>
         ) : (
-          <p className="text-sm text-muted-foreground">Failed to load status</p>
+          <>
+            <RefreshCw size={14} />
+            Sync Now
+          </>
         )}
-      </CardContent>
-
-      <CardFooter>
-        <Button
-          onClick={() => {
-            setSyncMessage(null);
-            triggerSync.mutate();
-          }}
-          disabled={triggerSync.isPending || status?.state === 'syncing'}
-          className="w-full"
-        >
-          {triggerSync.isPending ? (
-            <>
-              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-              Syncing...
-            </>
-          ) : (
-            <>
-              <RefreshCw className="w-4 h-4 mr-2" />
-              Sync Now
-            </>
-          )}
-        </Button>
-      </CardFooter>
+      </Btn>
     </Card>
   );
 }

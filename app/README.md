@@ -1,4 +1,4 @@
-# KiroCrew Sync App
+# Crew Sync (KiroCrew app)
 
 Full KiroCrew application for managing sync across machines.
 
@@ -85,7 +85,7 @@ third-party app execution is denied by default:
    gateway's boot-time reconcile revokes its executable resources on every
    restart — its backend won't run and no notifications will be delivered,
    even if it shows as "enabled".
-2. **Apps → Sync** → click **Enable**. This is what actually registers its
+2. **Apps → Crew Sync** → click **Enable**. This is what actually registers its
    agents/skills/crons and starts its backend (the install step above never
    does this by itself, even through the gateway).
 3. Navigate to **/apps/kirocrew-sync** in the dashboard.
@@ -197,6 +197,11 @@ listed above, and none are undocumented. FastAPI's own `/docs`, `/redoc` and
 ├── ui/
 │   ├── assets/
 │   │   └── icon.svg             # App icon (stroke-based sync mark, matches the RefreshCw lucide icon declared in app.json)
+│   ├── dist/
+│   │   └── index.mjs             # Built ESM bundle — what ui.entry in app.json points at. Committed; see "Building the UI bundle" below
+│   ├── index.tsx                 # Bundle entry — re-exports SyncDashboard as the default export AppHost's lazy() loads
+│   ├── lib/
+│   │   └── time.ts               # Small local relative/absolute time helpers (date-fns isn't a host-shared module)
 │   └── components/
 │       ├── SyncDashboard.tsx    # Page shell: status + daemon control + tabs
 │       ├── StatusWidget.tsx
@@ -204,10 +209,13 @@ listed above, and none are undocumented. FastAPI's own `/docs`, `/redoc` and
 │       ├── HistoryTimeline.tsx
 │       ├── ConflictPanel.tsx
 │       ├── QuarantinePanel.tsx
-│       └── BackendConfig.tsx
+│       ├── BackendConfig.tsx
+│       └── shared.tsx            # Small pieces shared across the panels above (inline message banner, loading/error/code-pill helpers)
 └── data/
     └── history.db                # Sync history database
 ```
+
+`ui/package.json`, `ui/esbuild.config.mjs`, `ui/tsconfig.json` and `ui/types/` are build-time only (dev dependencies, editor types) — none of them are needed on the machine the app runs on, and `ui/node_modules/` is gitignored and never copied by `install-app.sh`.
 
 ## Database Schema
 
@@ -218,6 +226,29 @@ listed above, and none are undocumented. FastAPI's own `/docs`, `/redoc` and
 **daemon_state**: Daemon configuration (enabled, scope, interval)
 
 ## Development
+
+### Building the UI bundle
+
+The dashboard is a normal React component (`app/ui/components/SyncDashboard.tsx`),
+but KiroCrew's `AppHost` loads third-party apps as a prebuilt ESM bundle, not
+raw `.tsx` — see `ui.entry` in `app.json`. React, ReactDOM, the JSX runtime,
+`lucide-react`, `@tanstack/react-query`, `@kirocrew/app-sdk` and `@kirocrew/ui`
+are all provided by the host at runtime (its import map resolves them to its
+own already-running instances), so the build marks every one of them
+`external` rather than bundling a second copy — bundling any of them would
+break React hooks.
+
+```bash
+cd app/ui
+npm install     # dev-only deps: esbuild + type stubs, never shipped
+npm run build   # writes app/ui/dist/index.mjs
+```
+
+`app/ui/dist/index.mjs` is committed to this repo — installs are a plain file
+copy with no Node/npm required on the target machine, so the build output has
+to already be there before `install-app.sh` runs. Re-run `npm run build`
+after editing anything under `app/ui/components/` or `app/ui/lib/`, and
+commit the updated `dist/index.mjs` alongside the source change.
 
 ### Testing API Locally
 

@@ -14,7 +14,7 @@ cd ~/.kiro/crew/apps/kirocrew-sync
 ```json
 {
   "name": "kirocrew-sync",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "displayName": "Sync",
   "description": "Synchronize KiroCrew data across machines with three-way merge. Keep knowledge, artifacts, and lessons consistent across your laptops and desktops, or share a knowledge library with your team.",
   "author": "kirocrew-sync",
@@ -676,7 +676,7 @@ cp -r ui/* "$APP_DIR/ui/"
 python3 "$APP_DIR/backend/database.py" init
 
 # Create installed.json
-echo '{"installedAt": "'$(date -Iseconds)'", "version": "1.0.0"}' > "$APP_DIR/installed.json"
+echo '{"installedAt": "'$(date -Iseconds)'", "version": "0.0.1"}' > "$APP_DIR/installed.json"
 
 echo "✅ KiroCrew Sync app installed"
 echo "Enable it in Settings → Apps → kirocrew-sync"

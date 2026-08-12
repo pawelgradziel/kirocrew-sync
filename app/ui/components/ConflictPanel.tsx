@@ -1,10 +1,8 @@
-import React, { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Card, CardHeader, CardContent } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Badge } from '@/components/ui/badge';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { Card, CardTitle, Btn, Badge, EmptyState } from '@kirocrew/ui';
+import { ChevronDown, ChevronRight, GitCompare } from 'lucide-react';
+import { CodePill, ErrorBlock, LoadingBlock } from './shared';
 
 interface Conflict {
   id: number;
@@ -19,10 +17,10 @@ interface Conflict {
 
 function DiffValue({ value, emptyLabel }: { value: string | null; emptyLabel: string }) {
   if (value === null) {
-    return <p className="text-xs italic text-muted-foreground">{emptyLabel}</p>;
+    return <p className="text-xs italic text-muted">{emptyLabel}</p>;
   }
   return (
-    <pre className="text-xs bg-muted rounded-md p-2 whitespace-pre-wrap break-words">{value}</pre>
+    <pre className="text-xs bg-bg-elevated rounded-md p-2 whitespace-pre-wrap break-words">{value}</pre>
   );
 }
 
@@ -70,9 +68,7 @@ export function ConflictPanel() {
   if (isLoading) {
     return (
       <Card>
-        <CardContent className="py-8 text-center">
-          <p className="text-sm text-muted-foreground">Loading conflicts...</p>
-        </CardContent>
+        <LoadingBlock label="Loading conflicts…" />
       </Card>
     );
   }
@@ -80,12 +76,7 @@ export function ConflictPanel() {
   if (isError) {
     return (
       <Card>
-        <CardContent className="py-8 text-center space-y-3">
-          <p className="text-sm text-muted-foreground">Failed to load conflicts</p>
-          <Button size="sm" variant="outline" onClick={() => refetch()}>
-            Retry
-          </Button>
-        </CardContent>
+        <ErrorBlock label="Failed to load conflicts" onRetry={() => refetch()} />
       </Card>
     );
   }
@@ -95,119 +86,94 @@ export function ConflictPanel() {
   if (conflicts.length === 0) {
     return (
       <Card>
-        <CardContent className="py-8 text-center">
-          <p className="text-sm text-muted-foreground">No unresolved conflicts</p>
-        </CardContent>
+        <EmptyState icon={<GitCompare size={40} />} title="No unresolved conflicts" />
       </Card>
     );
   }
 
   return (
     <Card>
-      <CardHeader>
-        <div className="flex items-center justify-between">
-          <h3 className="text-lg font-semibold">Unresolved Conflicts</h3>
-          <Badge variant="destructive">{conflicts.length}</Badge>
-        </div>
-      </CardHeader>
+      <div className="flex items-center justify-between mb-4">
+        <CardTitle className="mb-0">Unresolved Conflicts</CardTitle>
+        <Badge variant="err">{conflicts.length}</Badge>
+      </div>
 
-      <CardContent>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead className="w-8" />
-              <TableHead>Machine</TableHead>
-              <TableHead>Table</TableHead>
-              <TableHead>Row ID</TableHead>
-              <TableHead className="text-right">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-border text-left">
+              <th className="w-8 py-2" />
+              <th className="py-2 text-xs font-medium text-muted">Machine</th>
+              <th className="py-2 text-xs font-medium text-muted">Table</th>
+              <th className="py-2 text-xs font-medium text-muted">Row ID</th>
+              <th className="py-2 text-xs font-medium text-muted text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
             {conflicts.map((conflict) => {
               const isExpanded = expandedIds.has(conflict.id);
 
               return (
-                <React.Fragment key={conflict.id}>
-                  <TableRow>
-                    <TableCell>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-6 w-6 p-0"
+                <Fragment key={conflict.id}>
+                  <tr className="border-b border-border last:border-0">
+                    <td className="py-2">
+                      <button
+                        type="button"
                         aria-label={isExpanded ? 'Hide diff' : 'View diff'}
                         onClick={() => toggleExpanded(conflict.id)}
+                        className="p-[4px] rounded bg-transparent border-none text-muted hover:text-text cursor-pointer"
                       >
-                        {isExpanded ? (
-                          <ChevronDown className="w-4 h-4" />
-                        ) : (
-                          <ChevronRight className="w-4 h-4" />
-                        )}
-                      </Button>
-                    </TableCell>
-                    <TableCell className="font-medium">{conflict.machine}</TableCell>
-                    <TableCell>
-                      <code className="text-xs bg-muted px-1 py-0.5 rounded">{conflict.table_name}</code>
-                    </TableCell>
-                    <TableCell>
-                      <code className="text-xs bg-muted px-1 py-0.5 rounded">{conflict.row_id}</code>
-                    </TableCell>
-                    <TableCell className="text-right space-x-2">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => toggleExpanded(conflict.id)}
-                      >
-                        View Diff
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() =>
-                          resolveConflict.mutate({ id: conflict.id, resolution: 'local-wins' })
-                        }
-                        disabled={resolveConflict.isPending}
-                      >
-                        Keep Local
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() =>
-                          resolveConflict.mutate({ id: conflict.id, resolution: 'remote-wins' })
-                        }
-                        disabled={resolveConflict.isPending}
-                      >
-                        Keep Remote
-                      </Button>
-                    </TableCell>
-                  </TableRow>
+                        {isExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                      </button>
+                    </td>
+                    <td className="py-2 font-medium text-text">{conflict.machine}</td>
+                    <td className="py-2">
+                      <CodePill>{conflict.table_name}</CodePill>
+                    </td>
+                    <td className="py-2">
+                      <CodePill>{conflict.row_id}</CodePill>
+                    </td>
+                    <td className="py-2 text-right">
+                      <div className="flex gap-2 justify-end flex-wrap">
+                        <Btn onClick={() => toggleExpanded(conflict.id)}>View Diff</Btn>
+                        <Btn
+                          onClick={() => resolveConflict.mutate({ id: conflict.id, resolution: 'local-wins' })}
+                          disabled={resolveConflict.isPending}
+                        >
+                          Keep Local
+                        </Btn>
+                        <Btn
+                          onClick={() => resolveConflict.mutate({ id: conflict.id, resolution: 'remote-wins' })}
+                          disabled={resolveConflict.isPending}
+                        >
+                          Keep Remote
+                        </Btn>
+                      </div>
+                    </td>
+                  </tr>
 
                   {isExpanded && (
-                    <TableRow>
-                      <TableCell colSpan={5} className="bg-muted/30">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 py-2">
+                    <tr className="border-b border-border last:border-0">
+                      <td colSpan={5} className="bg-bg-elevated/30 py-2">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                           <div>
-                            <p className="text-xs font-medium text-muted-foreground mb-1">
-                              Local value
-                            </p>
+                            <p className="text-xs font-medium text-muted mb-1">Local value</p>
                             <DiffValue value={conflict.local_value} emptyLabel="No local value" />
                           </div>
                           <div>
-                            <p className="text-xs font-medium text-muted-foreground mb-1">
-                              Remote value
-                            </p>
+                            <p className="text-xs font-medium text-muted mb-1">Remote value</p>
                             <DiffValue value={conflict.remote_value} emptyLabel="No remote value" />
                           </div>
                         </div>
-                      </TableCell>
-                    </TableRow>
+                      </td>
+                    </tr>
                   )}
-                </React.Fragment>
+                </Fragment>
               );
             })}
-          </TableBody>
-        </Table>
-      </CardContent>
+          </tbody>
+        </table>
+      </div>
     </Card>
   );
 }
