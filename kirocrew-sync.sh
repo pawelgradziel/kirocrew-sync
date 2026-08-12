@@ -81,6 +81,10 @@ export KIROCREW_PATH_MAP SYNC_PORTABLE_PATHS
 SYNC_SCOPE="${ENV_SYNC_SCOPE:-${SYNC_SCOPE:-personal}}"
 
 SYNC_ROOT="$KIROCREW_DIR/.sync"
+
+# Touched after every successful pack, so check_kirocrew_running() can tell
+# KiroCrew's database writes apart from the ones our own pack just made.
+PACK_MARKER="$SYNC_ROOT/.last_pack"
 SYNC_BRANCH="main"
 
 # Each scope gets its own repo. They hold different subsets of the same data,
@@ -196,8 +200,18 @@ check_kirocrew_running() {
     # Use that same idleness heuristic. An open-but-idle KiroCrew is not
     # mid-transaction, so packing is safe; one that wrote a database in the
     # last minute may well be, and is still refused.
+    # Only writes NEWER than our own last pack count. A successful sync writes
+    # KiroCrew's databases itself, so counting every recent write made a sync
+    # poison the following minute: run N succeeds, and runs N+1/N+2 are refused
+    # because they see run N's own writes and read them as "KiroCrew is busy".
+    # Observed exactly that -- one sync merging 400 rows, then two refusals 30s
+    # and 44s later. The marker is touched after each successful pack, so
+    # anything not newer than it is our own work, not KiroCrew's.
+    local find_args=(-name "*.db" -mmin -1)
+    [ -f "$PACK_MARKER" ] && find_args+=(-newer "$PACK_MARKER")
+
     local recent_writes
-    recent_writes="$(find "$KIROCREW_DIR" -name "*.db" -mmin -1 2>/dev/null | wc -l | tr -d ' ')"
+    recent_writes="$(find "$KIROCREW_DIR" "${find_args[@]}" 2>/dev/null | wc -l | tr -d ' ')"
     if [ "${recent_writes:-0}" -eq 0 ]; then
         log_warn "KiroCrew is running but idle; applying merged data anyway."
         log_info "Running as: $running_as"
@@ -433,6 +447,12 @@ apply_to_kirocrew() {
         log_error "Pack failed; KiroCrew data was left unchanged (or restored)."
         exit 1
     fi
+
+    # Stamp AFTER the pack, so every database file it just wrote is older than
+    # the marker and the next run does not mistake our own writes for KiroCrew
+    # being busy. Best-effort: a sync that worked must not fail on a marker.
+    mkdir -p "$SYNC_ROOT" 2>/dev/null || true
+    touch "$PACK_MARKER" 2>/dev/null || true
 }
 
 publish_bundle() {
