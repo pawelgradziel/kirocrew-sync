@@ -37,6 +37,15 @@ _KIROCREW_DIR_ENV = "KIROCREW_DIR"
 LOG_LEVEL_ENV = "KIROCREW_SYNC_LOG_LEVEL"
 
 LOG_FILE_NAME = "backend.log"
+
+# The cron entry point (backend/cron_entry.py) writes here instead of
+# backend.log. Two processes must NOT share one RotatingFileHandler: rotation
+# renames the file out from under whichever process did not trigger it, which
+# then keeps appending to the now-orphaned inode until its own rotation, so
+# log segments go missing. The backend server is long-lived and the cron
+# process is spawned fresh every tick, so they genuinely do overlap.
+CRON_LOG_FILE_NAME = "cron.log"
+
 LOG_FILE_MAX_BYTES = 2 * 1024 * 1024  # 2MB
 LOG_FILE_BACKUP_COUNT = 3
 
@@ -74,14 +83,20 @@ def resolve_data_dir() -> Path:
     return Path.home() / ".kiro" / "crew" / "apps" / "kirocrew-sync" / "data"
 
 
-def configure_logging(level: Optional[str] = None) -> logging.Logger:
+def configure_logging(
+    level: Optional[str] = None, file_name: str = LOG_FILE_NAME
+) -> logging.Logger:
     """
     Configure the root logger with a stderr handler (always) plus a
-    best-effort rotating file handler at <data-dir>/backend.log.
+    best-effort rotating file handler at <data-dir>/<file_name>.
 
     `level` overrides KIROCREW_SYNC_LOG_LEVEL, which overrides the default
     of INFO. An unrecognized level name falls back to INFO rather than
     raising, since a typo'd env var must not prevent the app from starting.
+
+    `file_name` defaults to backend.log (the server process). The cron entry
+    point passes CRON_LOG_FILE_NAME so the two processes never share one
+    rotating handler -- see that constant for why.
 
     Idempotent: safe to call more than once (e.g. once per test via
     importlib.reload(server_module)) without stacking duplicate handlers --
@@ -116,7 +131,7 @@ def configure_logging(level: Optional[str] = None) -> logging.Logger:
     try:
         data_dir = resolve_data_dir()
         data_dir.mkdir(parents=True, exist_ok=True)
-        log_path = data_dir / LOG_FILE_NAME
+        log_path = data_dir / file_name
         file_handler = logging.handlers.RotatingFileHandler(
             str(log_path),
             maxBytes=LOG_FILE_MAX_BYTES,

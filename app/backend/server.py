@@ -4,7 +4,6 @@ FastAPI server for KiroCrew Sync app.
 
 import logging
 import os
-import subprocess
 import time
 from pathlib import Path
 from typing import Optional, Tuple
@@ -18,8 +17,9 @@ from .models import (
     QuarantineResponse, BackendsResponse, SyncTriggerResponse,
     ConflictResolution, DaemonConfig, DaemonControl, BackendConfig,
     BackendTestResult, BackendTestRequest, SyncStatus, SyncTriggerRequest,
-    BackendName, BackendConfigStatus, BackendConfigUpdate, SyncResult
+    BackendName, BackendConfigStatus, BackendConfigUpdate
 )
+from . import sync_runner
 from .sync_manager import SyncManager, SyncEngineUnavailable
 from .history import HistoryManager
 from .conflicts import ConflictManager
@@ -34,30 +34,18 @@ configure_logging()
 
 logger = logging.getLogger(__name__)
 
-# Notifications are owned by a different work package and may not exist yet
-# (or may fail to import while it's being written). Importing defensively
-# means this module -- and the whole app -- stays importable either way, and
-# notification calls become no-ops until that module lands.
-try:
-    from .notifications import get_notification_service
-except ImportError:
-    get_notification_service = None
-
 
 def _resolve_db_path() -> Optional[Path]:
     """
-    Resolve where the app's own SQLite database lives, honoring the same
-    KIROCREW_DIR override SyncManager uses for the sync engine's data, plus
-    a dedicated KIROCREW_SYNC_DB escape hatch. None keeps each manager's own
-    hardcoded default (~/.kiro/crew/apps/kirocrew-sync/data/history.db).
+    Resolve where the app's own SQLite database lives.
+
+    Delegates to sync_runner.resolve_db_path so this process and the cron
+    CLI cannot drift onto different databases -- if they did, cron runs
+    would be recorded somewhere the dashboard never reads, and the timeline
+    would look empty while syncs were plainly happening. Kept as a thin
+    wrapper because tests and the startup block reference this name.
     """
-    override = os.environ.get("KIROCREW_SYNC_DB")
-    if override:
-        return Path(override)
-    kirocrew_dir = os.environ.get("KIROCREW_DIR")
-    if kirocrew_dir:
-        return Path(kirocrew_dir) / "apps" / "kirocrew-sync" / "data" / "history.db"
-    return None
+    return sync_runner.resolve_db_path()
 
 
 app = FastAPI(title="KiroCrew Sync API")
@@ -200,92 +188,19 @@ async def get_health():
 
 
 # ---------------------------------------------------------------------------
-# Notifications
+# Sync orchestration
 # ---------------------------------------------------------------------------
-
-async def _notify(coro_factory):
-    """Run a single notification call, never letting it break the caller."""
-    if get_notification_service is None:
-        return
-    try:
-        svc = get_notification_service()
-        await coro_factory(svc)
-    except Exception:
-        # Notifications are best-effort; a broken notification channel must
-        # never fail a sync request that otherwise succeeded.
-        pass
-
-
-async def _send_sync_notifications(result, run_id: int, ingest: dict) -> None:
-    if result.exit_code not in (0, 3):
-        await _notify(lambda svc: svc.notify_failure(
-            result.error or f"Sync failed with exit code {result.exit_code}",
-            run_id=run_id,
-        ))
-
-    for machine in ingest.get("new_quarantine", []):
-        await _notify(lambda svc, m=machine: svc.notify_quarantine(
-            m, "Quarantined by the sync engine (version, embedding, or scope mismatch)"
-        ))
-
-    for conflict in ingest.get("new_unresolved_conflicts", []):
-        await _notify(lambda svc, c=conflict: svc.notify_conflict(c))
-
-    await _notify(lambda svc: svc.notify_sync_completed(
-        run_id=run_id,
-        rows_merged=result.rows_merged,
-        conflicts=len(ingest.get("conflicts", [])),
-        quarantine=len(ingest.get("quarantine", [])),
-    ))
-
-
-# ---------------------------------------------------------------------------
-# Sync-artifact ingestion safety
-# ---------------------------------------------------------------------------
-
-# cmd_sync() in kirocrew-sync.sh truncates conflicts.jsonl/quarantine.txt as
-# literally its first action (kirocrew-sync.sh:412-413), then immediately
-# logs "Unpacking local state..." (kirocrew-sync.sh:422) before doing
-# anything else. So exit codes 0 and 3 always come from a run that reached
-# (and got well past) that truncation. Exit code 1, though, can come from
-# *before* cmd_sync ever ran at all -- an invalid --strategy/--scope value,
-# or missing python3/git (require_python/require_git) -- in which case
-# conflicts.jsonl/quarantine.txt are untouched leftovers from whatever run
-# last completed, and ingesting them would re-record that old run's
-# conflicts/quarantine as if they were newly discovered, without bound.
 #
-# The strategy case is now closed off at the API boundary (SyncTriggerRequest
-# .strategy is a Literal, so a bad value never reaches run_sync at all -- see
-# models.py). The remaining pre-truncation exit-1 paths are environment
-# failures (python3/git missing or broken), not reachable through this API's
-# own parameters. SyncManager/artifacts.py are owned by a different work
-# package and are intentionally not edited here (see the review notes this
-# fixes), so this marker check is the best signal available from the
-# captured subprocess output alone, as defense in depth for that residual
-# case. A more robust fix belongs in SyncManager/kirocrew-sync.sh itself:
-# have cmd_sync emit an explicit machine-readable marker (or SyncManager
-# track whether the subprocess got past argument parsing), rather than
-# server.py pattern-matching a log line.
-_SYNC_TRUNCATION_MARKER = "Unpacking local state"
-
-
-def _sync_reached_truncation(result: SyncResult) -> bool:
-    """Whether conflicts.jsonl/quarantine.txt were (re)truncated by this
-    run, i.e. whether it is safe to ingest them as describing this run."""
-    if result.exit_code in (0, 3):
-        return True
-    return _SYNC_TRUNCATION_MARKER in (result.output or "")
-
-
-def _cleanup_history_safe() -> None:
-    """Best-effort trim of old sync_runs rows. Never lets a cleanup failure
-    fail the request that triggered it -- see cleanup_old_runs() in
-    history.py, which this app previously never called at all, so the
-    output/error text of every run accumulated in the DB unbounded."""
-    try:
-        history_mgr.cleanup_old_runs()
-    except Exception:
-        logger.exception("history cleanup_old_runs failed")
+# The whole "run the engine, then record a sync_runs row, ingest
+# conflicts.jsonl/quarantine.txt, stamp daemon_state, prune history, and send
+# notifications" sequence used to live in this file, as private helpers of the
+# POST /sync route below. It now lives in sync_runner.py, because the cron
+# needs the identical sequence and cannot reach this route to get it (a cron
+# `command` cannot authenticate to the app's own HTTP API -- see cli.py's
+# module docstring). Keeping one implementation is the point: a second copy in
+# the CLI would drift from this one silently, and the symptom would be a
+# dashboard that disagrees with itself depending on which entry point ran the
+# sync.
 
 
 # ---------------------------------------------------------------------------
@@ -310,8 +225,8 @@ def _compute_status() -> SyncStatus:
         # machines stayed quarantined (already surfaced above via
         # quarantine_count, and cleared once they rejoin), 1 = actually
         # failed. Only a genuine non-(0, 3) exit code is "failed" -- this
-        # mirrors _parse_output()/_send_sync_notifications() in
-        # sync_manager.py/server.py, which already treat (0, 3) as success.
+        # mirrors _parse_output()/send_sync_notifications() in
+        # sync_manager.py/sync_runner.py, which already treat (0, 3) as success.
         state = "failed"
     else:
         state = "idle"
@@ -347,99 +262,40 @@ async def trigger_sync(body: Optional[SyncTriggerRequest] = None):
     (strategy=auto, team=False, dry_run=False)."""
     request = body or SyncTriggerRequest()
     try:
-        already_running = await run_in_threadpool(sync_mgr.is_running)
-        if already_running:
+        # Blocking throughout (subprocess + sqlite), so it goes to a worker
+        # thread -- GET /status must stay answerable while a slow sync runs.
+        outcome = await run_in_threadpool(
+            sync_runner.run_sync_and_record,
+            sync_mgr, history_mgr, conflict_mgr, quarantine_mgr,
+            strategy=request.strategy,
+            team=request.team,
+            dry_run=request.dry_run,
+        )
+
+        if outcome.already_running:
             return SyncTriggerResponse(
                 started=False,
                 success=False,
                 message="Sync already in progress"
             )
 
-        start = time.time()
-        try:
-            result = await run_in_threadpool(
-                sync_mgr.run_sync,
-                strategy=request.strategy,
-                team=request.team,
-                dry_run=request.dry_run,
-            )
-        except subprocess.TimeoutExpired as exc:
-            # A timed-out sync previously vanished entirely: the 504 was
-            # raised before record_sync(), so there was no history row, no
-            # ingestion, and the (killed) engine left no trace at all. Record
-            # it as a failed run -- with whatever partial output the
-            # subprocess had produced before being killed, if any -- before
-            # still reporting the timeout to the caller.
-            duration_ms = int((time.time() - start) * 1000)
-            partial_stdout = exc.stdout if isinstance(exc.stdout, str) else (
-                exc.stdout.decode("utf-8", "replace") if exc.stdout else ""
-            )
-            partial_stderr = exc.stderr if isinstance(exc.stderr, str) else (
-                exc.stderr.decode("utf-8", "replace") if exc.stderr else ""
-            )
-            timeout_result = SyncResult(
-                exit_code=-1,
-                duration_ms=duration_ms,
-                scope="team" if request.team else "personal",
-                strategy=request.strategy,
-                dry_run=request.dry_run,
-                changes_detected=False,
-                rows_merged=0,
-                conflicts_count=0,
-                quarantine_count=0,
-                output=(partial_stdout or "") + (partial_stderr or ""),
-                error=f"Sync timed out after {exc.timeout}s and was killed",
-            )
-            run_id = await run_in_threadpool(history_mgr.record_sync, timeout_result)
-            await run_in_threadpool(_cleanup_history_safe)
+        if outcome.timed_out:
+            # The run was still recorded (with whatever partial output the
+            # killed subprocess produced) before this 504 -- a timed-out sync
+            # must not vanish without a trace.
             raise HTTPException(
                 status_code=504,
-                detail=f"Sync timed out (recorded as run {run_id})",
+                detail=f"Sync timed out (recorded as run {outcome.run_id})",
             )
 
-        run_id = await run_in_threadpool(history_mgr.record_sync, result)
+        await sync_runner.send_sync_notifications(outcome)
 
-        # Ingestion is a separate, non-atomic step from recording the run:
-        # if it raises, the sync itself already succeeded (or failed) and
-        # was already recorded -- that result must still be reported
-        # honestly rather than turning into a 500 for a sync that actually
-        # completed. Log it and move on with an empty ingest.
-        ingest = {
-            "conflicts": [], "quarantine": [],
-            "new_unresolved_conflicts": [], "new_quarantine": [],
-        }
-        if _sync_reached_truncation(result):
-            try:
-                ingest = await run_in_threadpool(
-                    sync_mgr.ingest_artifacts,
-                    run_id=run_id,
-                    team=request.team,
-                    conflict_mgr=conflict_mgr,
-                    quarantine_mgr=quarantine_mgr,
-                )
-            except Exception:
-                logger.exception(
-                    "Artifact ingestion failed for run %s; sync result is "
-                    "still reported to the caller", run_id,
-                )
-        else:
-            logger.warning(
-                "Run %s exited %s before cmd_sync reached truncation; "
-                "skipping artifact ingestion to avoid re-recording a "
-                "previous run's leftover conflicts.jsonl/quarantine.txt",
-                run_id, result.exit_code,
-            )
-
-        await run_in_threadpool(sync_mgr.record_daemon_run)
-        await run_in_threadpool(_cleanup_history_safe)
-
-        await _send_sync_notifications(result, run_id, ingest)
-
+        result = outcome.result
         return SyncTriggerResponse(
             started=True,
             success=result.exit_code in (0, 3),
             exit_code=result.exit_code,
-            run_id=run_id,
+            run_id=outcome.run_id,
             message=f"Sync completed with exit code {result.exit_code}"
         )
 

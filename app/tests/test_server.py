@@ -168,8 +168,25 @@ def test_health_does_not_touch_sync_engine_or_database(app_env, client, monkeypa
 def test_every_app_route_except_health_lives_under_api_prefix(app_env, client):
     from fastapi.routing import APIRoute
 
-    routes = [r for r in server_module.app.routes if isinstance(r, APIRoute)]
+    # FastAPI 0.141's include_router() does NOT flatten the included router's
+    # routes into app.routes -- it appends a single opaque _IncludedRouter
+    # entry (verified: app.routes holds 4 Route + 1 APIRoute + 1
+    # _IncludedRouter, while router.routes holds all 16 /api routes). Walking
+    # app.routes alone therefore finds only /health, and every assertion below
+    # would pass vacuously while the real routes went unchecked. Read both.
+    routes = [r for r in server_module.app.routes if isinstance(r, APIRoute)] + [
+        r for r in server_module.router.routes if isinstance(r, APIRoute)
+    ]
     assert routes, "expected at least one APIRoute on the app -- route discovery is broken"
+    # Guard against this test silently emptying out again: the app really does
+    # serve more than just /health, so a run that finds only /health means
+    # route discovery broke, not that the app shrank.
+    assert len(routes) > 1, (
+        f"expected the /api routes to be discoverable, found only {[r.path for r in routes]} "
+        "-- if include_router's internals changed again, update this enumeration "
+        "(and the matching one in server.py's startup block) rather than letting "
+        "this assertion pass on /health alone"
+    )
 
     non_api_routes = [r.path for r in routes if r.path != "/health" and not r.path.startswith("/api/")]
     assert non_api_routes == [], (

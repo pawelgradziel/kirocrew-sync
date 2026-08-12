@@ -55,7 +55,7 @@
     {
       "name": "sync-daemon",
       "every": 300,
-      "command": "\"$HOME/.kiro/crew/workspace/kirocrew-sync/kirocrew-sync.sh\" sync --strategy auto",
+      "command": "\"$HOME/.kiro/crew/apps/kirocrew-sync/.venv/bin/python3\" \"$HOME/.kiro/crew/apps/kirocrew-sync/backend/cli.py\" --strategy auto",
       "silent": true,
       "enabled": true
     }
