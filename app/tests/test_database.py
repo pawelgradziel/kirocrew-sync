@@ -10,7 +10,14 @@ import pytest
 
 from backend.database import Database
 
-EXPECTED_TABLES = {"sync_runs", "sync_changes", "conflicts", "quarantine", "daemon_state"}
+EXPECTED_TABLES = {
+    "sync_runs",
+    "sync_changes",
+    "conflicts",
+    "quarantine",
+    "daemon_state",
+    "notification_dedup",
+}
 
 DEFAULT_DAEMON_STATE = {
     "enabled": "true",
@@ -31,7 +38,7 @@ def _daemon_state(conn):
     return {row["key"]: row["value"] for row in rows}
 
 
-def test_initialize_creates_all_five_tables(db_path):
+def test_initialize_creates_all_expected_tables(db_path):
     db = Database(db_path)
     db.initialize()
     with db.connect() as conn:
@@ -135,6 +142,49 @@ def test_explicit_db_path_is_used_verbatim_and_ignores_home(db_path, monkeypatch
 
     assert db_path.exists()
     assert list(decoy_home.rglob("*")) == []
+
+
+def test_notification_dedup_table_has_expected_columns(db_path):
+    db = Database(db_path)
+    db.initialize()
+    with db.connect() as conn:
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(notification_dedup)")}
+    assert cols == {"channel", "dedup_key", "sent_at"}
+
+
+def test_notification_dedup_primary_key_rejects_duplicate_channel_and_key(db_path):
+    """(channel, dedup_key) is the primary key NotificationService keys its
+    dedup lookups on -- a plain INSERT of the same pair twice must fail so
+    that only the upsert form (ON CONFLICT DO UPDATE) that notifications.py
+    actually uses can overwrite it."""
+    db = Database(db_path)
+    db.initialize()
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO notification_dedup (channel, dedup_key, sent_at) VALUES (?, ?, ?)",
+            ("quarantine", "quarantine:laptop-a", 1000.0),
+        )
+        conn.commit()
+        with pytest.raises(Exception):
+            conn.execute(
+                "INSERT INTO notification_dedup (channel, dedup_key, sent_at) VALUES (?, ?, ?)",
+                ("quarantine", "quarantine:laptop-a", 2000.0),
+            )
+
+
+def test_notification_dedup_has_sent_at_index(db_path):
+    """The prune query in notifications.py filters on sent_at; make sure the
+    documented index actually exists rather than just being aspirational."""
+    db = Database(db_path)
+    db.initialize()
+    with db.connect() as conn:
+        indexes = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='notification_dedup'"
+            )
+        }
+    assert "idx_notification_dedup_sent_at" in indexes
 
 
 def test_initialize_logs_instead_of_printing(db_path, capsys, caplog):

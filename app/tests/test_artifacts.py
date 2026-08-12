@@ -316,3 +316,122 @@ def test_count_active_machines_excludes_quarantined(tmp_path):
         {"machine-a": ["main"], "machine-b": ["main"], "machine-c": ["main"]},
     )
     assert artifacts.count_active_machines(repo, quarantined={"machine-b"}) == 2
+
+
+# ---------------------------------------------------------------------------
+# parse_pack_stats() -- cli.py cmd_pack()'s
+# "packed <db>: N rows written, M deleted" lines
+# ---------------------------------------------------------------------------
+
+def test_parse_pack_stats_realistic_two_database_output():
+    output = (
+        "\x1b[0;32mℹ Applying merged state to KiroCrew...\x1b[0m\n"
+        "  packed memory: 30 rows written, 2 deleted\n"
+        "  packed knowledge: 12 rows written, 0 deleted\n"
+        "  packed 4 files\n"
+    )
+    stats = artifacts.parse_pack_stats(output)
+    assert stats == {
+        "memory": {"applied": 30, "deleted": 2},
+        "knowledge": {"applied": 12, "deleted": 0},
+    }
+
+
+def test_parse_pack_stats_no_pack_lines_returns_empty():
+    # A run that failed before apply_to_kirocrew() (unresolved conflicts,
+    # blocked gate, KiroCrew still running) never reaches cmd_pack() at all.
+    output = "✗ A previous sync left unresolved conflicts.\n"
+    assert artifacts.parse_pack_stats(output) == {}
+
+
+def test_parse_pack_stats_empty_output_returns_empty():
+    assert artifacts.parse_pack_stats("") == {}
+    assert artifacts.parse_pack_stats(None) == {}
+
+
+# ---------------------------------------------------------------------------
+# derive_sync_changes() -- the sync_changes rows a run's output and parsed
+# conflicts honestly support.
+# ---------------------------------------------------------------------------
+
+def test_derive_sync_changes_knowledge_pack_written_and_deleted():
+    output = "  packed knowledge: 5 rows written, 2 deleted\n"
+    changes = artifacts.derive_sync_changes(output, [])
+    assert len(changes) == 2
+    written, deleted = changes
+    assert written.change_type == "knowledge"
+    assert written.action == "updated"
+    assert written.item_id is None
+    assert "5 row(s)" in written.details
+    assert deleted.change_type == "knowledge"
+    assert deleted.action == "deleted"
+    assert "2 row(s)" in deleted.details
+
+
+def test_derive_sync_changes_memory_pack_is_not_recorded():
+    """memory.db's aggregate count mixes lesson/transcript/bookkeeping
+    tables with no way to split it back apart -- see the module-level
+    comment in artifacts.py. It must not be guessed into either category,
+    or dropped as though nothing happened silently-wrongly attributed."""
+    output = "  packed memory: 30 rows written, 2 deleted\n"
+    assert artifacts.derive_sync_changes(output, []) == []
+
+
+def test_derive_sync_changes_zero_counts_produce_no_rows():
+    output = "  packed knowledge: 0 rows written, 0 deleted\n"
+    assert artifacts.derive_sync_changes(output, []) == []
+
+
+def test_derive_sync_changes_no_pack_and_no_conflicts_is_empty():
+    """The honest answer for a dry run, or a run where nothing changed: zero
+    rows, never a placeholder."""
+    assert artifacts.derive_sync_changes("", []) == []
+
+
+def test_derive_sync_changes_classifies_knowledge_table_conflict():
+    record = ConflictRecord(table="items", key="item-42", kind="edit/edit", resolution="kept local")
+    changes = artifacts.derive_sync_changes("", [record])
+    assert len(changes) == 1
+    change = changes[0]
+    assert change.change_type == "knowledge"
+    assert change.action == "conflict"
+    assert change.item_id == "item-42"
+    assert "edit/edit" in change.details
+    assert "kept local" in change.details
+
+
+def test_derive_sync_changes_classifies_lesson_and_transcript_tables():
+    lesson = ConflictRecord(table="semantic_memory", key="lesson-1", kind="edit/edit", resolution="kept remote")
+    transcript = ConflictRecord(table="episodic_memories", key="ep-1", kind="delete/modify", resolution="kept deletion")
+    changes = artifacts.derive_sync_changes("", [lesson, transcript])
+    assert [c.change_type for c in changes] == ["lesson", "transcript"]
+    assert [c.action for c in changes] == ["conflict", "conflict"]
+
+
+def test_derive_sync_changes_classifies_file_conflicts_by_path():
+    config = ConflictRecord(table="config.json", key="config.json", kind="value", resolution="kept local")
+    artifact = ConflictRecord(table="artifacts/foo.json", key="artifacts/foo.json", kind="value", resolution="unresolved")
+    transcript = ConflictRecord(table="sessions/2024-01-01.jsonl", key="sessions/2024-01-01.jsonl", kind="value", resolution="kept edit")
+    changes = artifacts.derive_sync_changes("", [config, artifact, transcript])
+    assert [c.change_type for c in changes] == ["config", "artifact", "transcript"]
+
+
+def test_derive_sync_changes_drops_unclassifiable_conflicts():
+    """memory.db bookkeeping tables and bare workspace/*.md paths cannot be
+    honestly attributed to any single change_type -- they are dropped, not
+    guessed."""
+    bookkeeping = ConflictRecord(table="memory_events", key="e1", kind="edit/edit", resolution="kept local")
+    workspace_note = ConflictRecord(table="workspace/notes.md", key="workspace/notes.md", kind="value", resolution="kept remote")
+    assert artifacts.derive_sync_changes("", [bookkeeping, workspace_note]) == []
+
+
+def test_derive_sync_changes_combines_pack_and_conflicts():
+    output = (
+        "  packed knowledge: 3 rows written, 0 deleted\n"
+        "  packed memory: 10 rows written, 0 deleted\n"
+    )
+    conflict = ConflictRecord(table="sources", key="src-1", kind="edit/edit", resolution="kept local")
+    changes = artifacts.derive_sync_changes(output, [conflict])
+    assert len(changes) == 2
+    assert changes[0].change_type == "knowledge" and changes[0].action == "updated"
+    assert changes[1].change_type == "knowledge" and changes[1].action == "conflict"

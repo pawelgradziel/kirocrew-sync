@@ -15,6 +15,11 @@ This handles both use cases:
 1. **Personal**: switching between your own machines
 2. **Team**: colleagues publishing new knowledge that propagates to your machine
 
+The 5/0.5/10-minute figures above are the *standalone* defaults. If the
+KiroCrew Sync app is installed, this daemon cooperates with it instead --
+see [KiroCrew App Integration](#kirocrew-app-integration) below for what
+changes.
+
 ## Installation
 
 ### Linux (systemd)
@@ -90,6 +95,130 @@ Press Ctrl+C to stop. You should see:
 [2026-08-11 21:45:00] Next check in 300s
 ```
 
+## KiroCrew App Integration
+
+This daemon works standalone -- nothing below is required for
+`./kirocrew-sync.sh daemon` to function, and everything above this section
+still applies unchanged if you never install the KiroCrew Sync app. This
+section describes what changes when the app *is* installed.
+
+### Why this exists
+
+Without the app, `kirocrew-sync.sh daemon` running via cron/systemd/launchd
+is invisible to KiroCrew: it calls `kirocrew-sync.sh sync` directly, which
+records nothing anywhere the app can see (no history row, no conflict/
+quarantine entry, no notification), and each run truncates
+`conflicts.jsonl`/`quarantine.txt` as its first action -- so even that
+evidence is gone before anything else could read it. A machine syncing
+purely through this daemon would show an empty dashboard despite syncing
+being fully functional. And separately, the app's dashboard lets you set a
+polling interval and scope, but this daemon used to have no way to know
+about either -- they were just a database row nobody read.
+
+### Detection
+
+Every daemon tick checks whether the app is installed, by looking for its
+standalone entry point at the layout the app itself uses (mirroring
+`app.json`'s own cron command and `app/backend/sync_runner.py`'s
+`resolve_db_path()`, rather than inventing a second scheme):
+
+```
+$KIROCREW_DIR/apps/kirocrew-sync/backend/cli.py
+$KIROCREW_DIR/apps/kirocrew-sync/.venv/bin/python3
+```
+
+If both exist and the Python interpreter is executable, the app is
+considered installed for that tick. This is re-checked every cycle, not
+just at startup, so installing or removing the app while the daemon is
+already running takes effect on the next tick.
+
+### Recording: delegating to `cli.py`
+
+When the app is installed, a tick that decides to sync no longer calls
+`kirocrew-sync.sh sync` directly. It instead runs:
+
+```
+<app dir>/.venv/bin/python3 <app dir>/backend/cli.py --strategy auto [--team]
+```
+
+(`--team` is added when this daemon's own scope is `team`, i.e. it was
+started with `kirocrew-sync.sh daemon --team`.) `cli.py` is the app's own
+entry point for exactly this case -- it calls this same engine and then
+records a `sync_runs` row, ingests any conflicts/quarantine, and sends
+notifications, the same as clicking "Sync Now" in the dashboard. See
+`app/backend/cli.py` and `app/backend/sync_runner.py` for that side of the
+contract. This daemon does not reimplement any of that recording itself.
+
+`cli.py` exits 0 for a clean sync *or* one that ends with machines still
+quarantined (engine exit 3 -- its own contract deliberately treats that as
+"the cron did its job"), and non-zero on a real failure. This daemon
+recovers the underlying engine exit code from `cli.py`'s own summary log
+line when present, so a quarantined run still gets the same "back to the
+idle cadence" treatment (rather than the faster "something happened, check
+again soon" one) it would get without the app installed -- and falls back
+to `cli.py`'s own 0/non-zero exit code if that line is ever missing.
+
+Note this app also has its own, separate delivery mechanism: `app.json`
+declares a KiroCrew-native cron job that ticks `cli.py` directly, on its
+own fixed schedule, independent of whether this daemon is running at all.
+Running this daemon *in addition to* an installed app is safe, not
+redundant-and-wrong: `cli.py`'s own `run_sync_and_record()` checks whether a
+sync is already in flight before starting another, so an app-cron tick and
+a daemon tick landing close together do not race.
+
+### Interval reconciliation
+
+The app's dashboard exposes a single "how often" number (60-900 seconds,
+stored in its `daemon_state` table). This daemon has three: idle, active,
+backoff. Collapsing to one flat interval everywhere would throw the
+adaptive behavior away entirely -- no more "check back in 30 seconds after
+something happened", no more "back off for longer after a failure". So
+instead:
+
+- The app's configured interval becomes the new **idle** baseline (that is
+  what "how often should this poll" means when nothing is happening).
+- **Active** and **backoff** are rescaled around it, keeping the same
+  ratios as the hardcoded defaults: active = idle ÷ 10, backoff = idle × 2
+  (so the defaults' 300/30/600 relationship is preserved at any configured
+  idle value).
+
+A user who sets the slider to, say, 600s gets idle=600s, active=60s,
+backoff=1200s -- proportionally faster follow-up checks and proportionally
+longer backoff, not a flat 600s everywhere. This is re-read every cycle, so
+a change made on the dashboard while the daemon is already running takes
+effect on the next tick, without a restart.
+
+If the app isn't installed, or its interval can't be read (see below),
+this daemon falls straight back to the hardcoded 300/30/600 defaults --
+identical to running without the app at all.
+
+### The `sqlite3` requirement
+
+Reading the app's configured interval means reading its sqlite database
+from bash, which needs the `sqlite3` CLI binary. This is checked with
+`command -v sqlite3` on first use and cached for the process's lifetime;
+its absence is handled gracefully, not assumed away. If `sqlite3` isn't
+installed:
+
+- The app can still be detected and ticks still delegate to `cli.py` (that
+  path needs only the app's own Python/venv, never the `sqlite3` binary --
+  `cli.py` talks to its database through Python's own `sqlite3` module, in
+  its own process).
+- Only interval reading is affected: this daemon falls back to the
+  hardcoded 300/30/600 defaults, and logs that fact once at startup.
+
+```
+[...] KiroCrew app detected at /home/user/.kiro/crew/apps/kirocrew-sync: sync ticks will be delegated to its cli.py for recording
+[...] sqlite3 not found: using built-in adaptive intervals (cannot read the app's configured interval)
+```
+
+### Database location
+
+The database read for the interval is resolved the same way
+`sync_runner.resolve_db_path()` resolves it on the app's side: an explicit
+`KIROCREW_SYNC_DB` environment variable wins; otherwise it's
+`$KIROCREW_DIR/apps/kirocrew-sync/data/history.db`.
+
 ## Team Scope
 
 To run background sync in team mode, edit the service file:
@@ -131,6 +260,12 @@ The daemon respects your `config.sh` settings:
 - `SYNC_SCOPE` (personal or team)
 
 Environment variables in the service file override `config.sh` if needed.
+
+If the KiroCrew app is installed, its dashboard (Settings → Daemon) also
+controls the polling interval -- see
+[KiroCrew App Integration](#kirocrew-app-integration) above. That in turn
+honors `KIROCREW_SYNC_DB` if set, the same escape hatch the app itself
+supports for a non-default database location.
 
 ## Logs
 
@@ -205,6 +340,26 @@ The daemon adjusts its polling based on activity:
 | Changes synced successfully | 30 seconds | Catch follow-on changes quickly |
 | Sync failed or conflicted | 10 minutes | Back off, give time to resolve |
 | KiroCrew actively writing | Skip cycle | Avoid mid-write corruption |
+
+The "5 minutes" figure is the *idle* interval; if the KiroCrew app is
+installed and its dashboard interval is readable (see
+[KiroCrew App Integration](#kirocrew-app-integration)), it replaces 5
+minutes as the idle baseline and the other two intervals are rescaled
+around it, not fixed at 30s/10min regardless of the configured value.
+
+## Known Limitations
+
+**Idle detection can be less reliable than the table above implies.** The
+"No changes detected" row depends on a fast, no-merge check against the
+storage backend; when that check can't reach the backend, the daemon
+currently cannot always tell "genuinely nothing changed" apart from "could
+not check" and treats it as the latter (the "Sync failed or conflicted"
+backoff cadence), rather than settling into the idle cadence. If you
+notice your daemon logging "Backend unreachable" continuously even though
+the backend is healthy and reachable by other means (`kirocrew-sync.sh
+status` works, manual `sync` works), this is why -- it is not specific to
+having the app installed, and is tracked separately from the app
+integration described in this document.
 
 ## Alternative: Cron (simpler, less adaptive)
 

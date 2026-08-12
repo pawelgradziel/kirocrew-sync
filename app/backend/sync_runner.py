@@ -29,11 +29,12 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
+from . import artifacts
 from .conflicts import ConflictManager
 from .history import HistoryManager
-from .models import SyncResult
+from .models import SyncChange, SyncResult
 from .notifications import get_notification_service
 from .quarantine import QuarantineManager
 from .sync_manager import SyncManager
@@ -93,6 +94,26 @@ def _sync_reached_truncation(result: SyncResult) -> bool:
     if result.exit_code in (0, 3):
         return True
     return _SYNC_TRUNCATION_MARKER in (result.output or "")
+
+
+def _derive_changes(sync_mgr: SyncManager, result: SyncResult, team: bool) -> List[SyncChange]:
+    """
+    The sync_changes rows this run's output honestly supports (see
+    artifacts.derive_sync_changes for exactly what is and is not derivable).
+
+    Reads conflicts.jsonl directly rather than waiting for
+    ingest_artifacts() to hand back its parsed records, because record_sync()
+    -- which needs this list -- has to run before ingest_artifacts() can (it
+    produces the run_id ingest_artifacts() writes conflicts against). This
+    mirrors SyncManager._artifact_counts(), which already re-reads the same
+    file independently, for the same reason: cmd_sync() truncates
+    conflicts.jsonl once at the very start of the run and nothing rewrites it
+    before this function or ingest_artifacts() gets to read it, so reading it
+    twice yields identical records, not stale or duplicated ones.
+    """
+    paths = artifacts.scope_paths(sync_mgr.sync_root, team)
+    conflict_records = artifacts.read_conflicts(paths["conflicts"])
+    return artifacts.derive_sync_changes(result.output, conflict_records)
 
 
 def _cleanup_history_safe(history_mgr: HistoryManager) -> None:
@@ -200,7 +221,22 @@ def run_sync_and_record(
             timeout_seconds=exc.timeout,
         )
 
-    run_id = history_mgr.record_sync(result)
+    # Change derivation reads conflicts.jsonl (see _derive_changes' docstring
+    # for why it cannot simply wait for ingest_artifacts()'s copy), gated by
+    # the same truncation check ingest_artifacts() uses below -- otherwise a
+    # run that exited before cmd_sync() ever truncated the log would read
+    # (and record as its own) a previous run's leftover conflicts.
+    changes: List[SyncChange] = []
+    if _sync_reached_truncation(result):
+        try:
+            changes = _derive_changes(sync_mgr, result, team)
+        except Exception:
+            logger.exception(
+                "Change derivation failed for this run; sync result is "
+                "still recorded"
+            )
+
+    run_id = history_mgr.record_sync(result, changes=changes)
 
     # Ingestion is a separate, non-atomic step from recording the run: if it
     # raises, the sync itself already succeeded (or failed) and was already

@@ -60,6 +60,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .database import Database
 from .models import Conflict
 
 logger = logging.getLogger(__name__)
@@ -169,9 +170,35 @@ class NotificationService:
     use and is cached for the lifetime of this instance - see
     ``_ensure_transport``. Construct once per process (use
     ``get_notification_service()``) rather than per call.
+
+    Dedup state (see ``_is_duplicate``/``_record_seen``) lives in two
+    places at once:
+
+    - An in-memory ``(channel, dedup_key) -> monotonic timestamp`` dict,
+      always maintained regardless of ``db_path``. This is the *only*
+      dedup available when ``db_path`` is None (e.g. in tests), and is
+      always kept as a fallback even when a database is configured.
+    - Optionally, the ``notification_dedup`` table in the sqlite database at
+      ``db_path`` (see database.py). This is what makes dedup survive
+      across separate ``NotificationService`` instances backed by the same
+      file - the actual gap this exists to close: the cron CLI
+      (backend/cli.py) constructs a fresh instance on every tick and exits
+      immediately, so an in-memory-only dict never remembers anything
+      between ticks and a persistently failing sync re-notified forever.
+
+    Any failure touching that database - unwritable directory, corrupt
+    file, a locked write - is caught and logged, never raised, and falls
+    back to the in-memory window for that call. Losing cross-process dedup
+    is an acceptable degradation; breaking the sync path that calls these
+    methods is not.
     """
 
-    def __init__(self, enabled: bool = True, dedup_window_seconds: float = DEFAULT_DEDUP_WINDOW_SECONDS) -> None:
+    def __init__(
+        self,
+        enabled: bool = True,
+        dedup_window_seconds: float = DEFAULT_DEDUP_WINDOW_SECONDS,
+        db_path: Optional[Path] = None,
+    ) -> None:
         """
         Args:
             enabled: Master on/off switch. When False, every notify_* call
@@ -180,6 +207,13 @@ class NotificationService:
                 suppresses a repeat notification. Injectable so tests don't
                 have to sleep for 5 minutes; defaults to the app's cron
                 cadence (see DEFAULT_DEDUP_WINDOW_SECONDS).
+            db_path: Optional sqlite file backing cross-process dedup state
+                (see the class docstring). None (the default) means
+                dedup is in-memory only for this instance's lifetime -
+                the same behavior this class had before database-backed
+                dedup existed, which is exactly what most tests want.
+                ``get_notification_service()`` passes the app's real
+                database path in production.
         """
         self.enabled = enabled
         self._dedup_window = dedup_window_seconds
@@ -191,6 +225,13 @@ class NotificationService:
         self._transport_available = False
         self._app_secret: Optional[str] = None
         self._token: Optional[str] = None
+
+        # Dedup database resolution cache - see _dedup_db_ready(). Like the
+        # transport cache above, resolved at most once per instance.
+        self._db_path = db_path
+        self._db: Optional[Database] = None
+        self._dedup_db_checked = False
+        self._dedup_db_ok = False
 
     # -- Public interface ---------------------------------------------------
 
@@ -371,14 +412,109 @@ class NotificationService:
 
     # -- Dedup ------------------------------------------------------------
 
+    def _dedup_db_ready(self) -> bool:
+        """Resolve (once) whether the dedup database can be reached at all.
+
+        Mirrors ``_ensure_transport``'s "detect once, cache the verdict"
+        shape: ``Database(...).initialize()`` both validates that the
+        directory/file is usable and ensures the ``notification_dedup``
+        table exists (idempotent - ``CREATE TABLE IF NOT EXISTS``), so a
+        caller never has to have initialized the schema first.
+
+        Only this *structural* check is cached. A path that fails here
+        (unwritable directory, corrupt file) is unlikely to start working
+        later in the same process, so the negative result short-circuits
+        every subsequent call without touching the filesystem again. A
+        transient failure on an already-validated path (a locked write, a
+        one-off I/O error) is deliberately NOT cached here - see
+        ``_is_duplicate``/``_record_seen``, which catch those per call and
+        fall back without permanently disabling the database.
+        """
+        if self._db_path is None:
+            return False
+        if self._dedup_db_checked:
+            return self._dedup_db_ok
+
+        self._dedup_db_checked = True
+        try:
+            db = Database(self._db_path)
+            db.initialize()
+            self._db = db
+            self._dedup_db_ok = True
+        except Exception as exc:  # noqa: BLE001 - resolution must never raise
+            logger.debug(
+                "notification dedup database unavailable at %s: %s", self._db_path, exc
+            )
+            self._dedup_db_ok = False
+        return self._dedup_db_ok
+
     def _is_duplicate(self, channel_id: str, dedup_key: str) -> bool:
+        if self._dedup_db_ready():
+            try:
+                with self._db.connect() as conn:
+                    row = conn.execute(
+                        "SELECT sent_at FROM notification_dedup WHERE channel = ? AND dedup_key = ?",
+                        (channel_id, dedup_key),
+                    ).fetchone()
+                if row is not None:
+                    return (time.time() - row["sent_at"]) < self._dedup_window
+                return False
+            except Exception as exc:  # noqa: BLE001 - a read failure must fall back, not raise
+                logger.debug(
+                    "notification dedup read failed for %s/%s, falling back to "
+                    "in-memory window: %s",
+                    channel_id, dedup_key, exc,
+                )
+                # fall through to the in-memory check below
+
+        # No database configured, or the read above failed: fall back to
+        # the in-process window. This dict is always kept current by
+        # _record_seen regardless of whether the database is in use (see
+        # below), so it is a real fallback rather than always-empty dead
+        # code.
         last_seen = self._dedup_seen.get((channel_id, dedup_key))
         if last_seen is None:
             return False
         return (time.monotonic() - last_seen) < self._dedup_window
 
     def _record_seen(self, channel_id: str, dedup_key: str) -> None:
+        # Always update the in-memory fallback, database or not - see
+        # _is_duplicate.
         self._dedup_seen[(channel_id, dedup_key)] = time.monotonic()
+
+        if not self._dedup_db_ready():
+            return
+
+        now = time.time()
+        try:
+            with self._db.connect() as conn:
+                conn.execute(
+                    "INSERT INTO notification_dedup (channel, dedup_key, sent_at) "
+                    "VALUES (?, ?, ?) "
+                    "ON CONFLICT(channel, dedup_key) DO UPDATE SET sent_at = excluded.sent_at",
+                    (channel_id, dedup_key, now),
+                )
+                # Opportunistic prune, piggybacked on the same write rather
+                # than a separate scheduled job - this table only ever
+                # grows on a dispatched (non-duplicate) notification, so
+                # pruning here on every such write keeps it bounded without
+                # its own cron tick. Retention is a multiple of the dedup
+                # window (minimum 1 hour): comfortably longer than anything
+                # that could still affect dedup, short enough that a
+                # channel/error-hash key from a long-resolved incident
+                # doesn't sit in the table forever.
+                retention_seconds = max(self._dedup_window * 4, 3600.0)
+                conn.execute(
+                    "DELETE FROM notification_dedup WHERE sent_at < ?",
+                    (now - retention_seconds,),
+                )
+                conn.commit()
+        except Exception as exc:  # noqa: BLE001 - a write failure must not raise
+            logger.debug(
+                "notification dedup write failed for %s/%s (dedup for this "
+                "call may not persist): %s",
+                channel_id, dedup_key, exc,
+            )
 
     # -- Shared push path ---------------------------------------------------
 
@@ -434,15 +570,52 @@ class NotificationService:
 _default_service: Optional[NotificationService] = None
 
 
+def _resolve_notification_db_path() -> Path:
+    """Resolve the sqlite file backing cross-process notification dedup.
+
+    Mirrors ``sync_runner.resolve_db_path()`` - the single resolution
+    scheme server.py's HTTP route and cli.py's cron entry point already
+    both use for the ``sync_runs``/``conflicts``/``quarantine`` database -
+    rather than inventing a second env-var scheme here. Two independent
+    schemes could disagree and point notification dedup state at a
+    different file than the one runs are actually recorded into, silently
+    breaking the whole point of this table.
+
+    Imported lazily, not at module load: ``sync_runner`` imports
+    ``get_notification_service`` from *this* module at its own module
+    scope, so importing ``sync_runner`` back at this module's top level
+    would be a circular import. By the time this function actually runs
+    (inside ``get_notification_service()``, i.e. well after both modules
+    have finished loading), that's no longer a problem.
+
+    ``resolve_db_path()`` returns ``None`` to mean "no env override, use
+    each manager's own default" - for ``Database`` that default is
+    ``Path.home() / ".kiro/crew/apps/kirocrew-sync/data/history.db"`` (see
+    ``Database.__init__``). That default is recomputed here rather than
+    read off a ``Database`` instance so this function has no side effects
+    of its own (``Database.__init__`` creates its parent directory as a
+    side effect), and ``Path.home()`` is called fresh on every invocation
+    rather than cached at import time, so a test that monkeypatches it
+    (``conftest.py``'s autouse ``_fake_home`` fixture) is honored even
+    though this function typically runs lazily, long after import.
+    """
+    from .sync_runner import resolve_db_path
+
+    override = resolve_db_path()
+    if override is not None:
+        return override
+    return Path.home() / ".kiro" / "crew" / "apps" / APP_NAME / "data" / "history.db"
+
+
 def get_notification_service() -> NotificationService:
     """Return the shared NotificationService instance.
 
     Callers (server.py, sync_manager.py) should use this instead of
-    constructing NotificationService directly, so the dedup window and
-    transport cache are shared across the whole process rather than reset
-    per caller.
+    constructing NotificationService directly, so the dedup window,
+    transport cache, and (now) the dedup database path are shared across
+    the whole process rather than reset per caller.
     """
     global _default_service
     if _default_service is None:
-        _default_service = NotificationService()
+        _default_service = NotificationService(db_path=_resolve_notification_db_path())
     return _default_service

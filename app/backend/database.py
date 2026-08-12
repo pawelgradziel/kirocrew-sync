@@ -73,6 +73,27 @@ CREATE TABLE IF NOT EXISTS quarantine (
 CREATE INDEX IF NOT EXISTS idx_quarantine_machine ON quarantine(machine);
 CREATE INDEX IF NOT EXISTS idx_quarantine_active ON quarantine(cleared_at) WHERE cleared_at IS NULL;
 
+-- Cross-process notification dedup state. NotificationService (see
+-- notifications.py) suppresses a repeat push to the same (channel,
+-- dedup_key) within a rolling window; keying that here rather than only in
+-- an in-memory dict is what lets the long-lived FastAPI backend and the
+-- short-lived, freshly-spawned cron CLI (backend/cli.py, which exits right
+-- after one sync tick) agree on dedup state instead of the CLI re-notifying
+-- on every single tick. sent_at is a Unix timestamp (float seconds, i.e.
+-- time.time()), not an ISO string like sync_runs.timestamp, because the
+-- only thing ever done with it is a "how many seconds ago" comparison.
+CREATE TABLE IF NOT EXISTS notification_dedup (
+    channel TEXT NOT NULL,
+    dedup_key TEXT NOT NULL,
+    sent_at REAL NOT NULL,
+    PRIMARY KEY (channel, dedup_key)
+);
+
+-- Supports NotificationService's opportunistic prune (a DELETE WHERE
+-- sent_at < cutoff run alongside every write, see notifications.py) so this
+-- table stays bounded without a separate scheduled job.
+CREATE INDEX IF NOT EXISTS idx_notification_dedup_sent_at ON notification_dedup(sent_at);
+
 CREATE TABLE IF NOT EXISTS daemon_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,

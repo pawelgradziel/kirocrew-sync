@@ -127,11 +127,120 @@ cleanup_temp() {
     [ -n "${TEMP_DIR:-}" ] && rm -rf "$TEMP_DIR"
     return 0
 }
-trap cleanup_temp EXIT
 
 make_temp_dir() {
     TEMP_DIR="$(mktemp -d)"
 }
+
+# --------------------------------------------------------------------------
+# Sync lock -- serializes cmd_sync/cmd_resume/cmd_push against each other.
+#
+# Without this, SIGKILLing lib/daemon.sh's daemon leaves any
+# `kirocrew-sync.sh sync` child it had spawned running orphaned, and the
+# KiroCrew app's POST /api/sync (SyncManager.is_running(), a `pgrep`) can
+# start a second one on top of it. Both would share one git repo
+# ($SYNC_REPO), one conflicts.jsonl and one quarantine.txt for the scope --
+# and cmd_sync() truncates those two log files at the very start of every
+# run, so an overlapping pair can destroy each other's conflict/quarantine
+# evidence and interleave `git merge`/`git commit` on the same working tree.
+#
+# Scope: one lock PER SYNC SCOPE, not one global lock for the whole script.
+# scope_paths() gives "personal" and "team" entirely disjoint $SYNC_REPO,
+# $CONFLICT_LOG and $QUARANTINE_LOG (kirocrew-sync.sh:93-104) precisely so
+# switching scope never looks like a mass deletion to the other scope. A
+# personal sync and a team sync therefore touch no files in common, and a
+# single script-wide lock would serialize two operations that can safely run
+# at once -- e.g. the daemon polling personal while the app triggers a
+# manual team sync. The lock file lives under $SYNC_ROOT (shared) but is
+# named per scope so it inherits that same independence.
+#
+# Stale-lock handling (PID in the file, `kill -0` liveness, clean up if the
+# holder is dead) mirrors lib/daemon.sh's acquire_daemon_lock() -- same
+# convention, so anyone who already knows that pattern recognizes this one --
+# but is NOT implemented by editing that file; lib/daemon.sh's lock protects
+# a different resource (one daemon process per machine) and is owned
+# elsewhere. The acquire step below is deliberately stronger than
+# acquire_daemon_lock()'s plain check-then-write, which has a TOCTOU race
+# between "lock file absent" and "write my PID": harmless for a daemon a
+# human starts by hand, but this lock also guards POST /api/sync, where two
+# requests can arrive close enough together to both pass a naive check
+# before either writes. `set -C` (noclobber) makes the write an atomic
+# O_EXCL create instead, so two racing acquires can never both succeed.
+SYNC_LOCK_PID=""
+SYNC_LOCK_PATH=""
+
+sync_lock_path() {
+    echo "$SYNC_ROOT/sync-${SYNC_SCOPE}.lock"
+}
+
+acquire_sync_lock() {
+    mkdir -p "$SYNC_ROOT"
+    local lock_file
+    lock_file="$(sync_lock_path)"
+
+    local attempt
+    for attempt in 1 2; do
+        if ( set -C; echo "$$" > "$lock_file" ) 2>/dev/null; then
+            SYNC_LOCK_PID=$$
+            SYNC_LOCK_PATH="$lock_file"
+            return 0
+        fi
+
+        local lock_pid
+        lock_pid="$(cat "$lock_file" 2>/dev/null || echo "")"
+        if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+            log_error "Another sync (scope: $SYNC_SCOPE) is already running, PID $lock_pid"
+            log_info "Wait for it to finish and try again."
+            log_info "If you're certain it's dead: rm '$lock_file'"
+            exit 1
+        fi
+
+        log_warn "Cleaning stale sync lock (PID ${lock_pid:-unknown} not running)"
+        rm -f "$lock_file"
+        # Loop back and retry the atomic create once. A second failure here
+        # means another process won the race in the gap between our cleanup
+        # and our retry -- rare, but still handled below rather than assumed
+        # away.
+    done
+
+    log_error "Could not acquire sync lock at $lock_file"
+    exit 1
+}
+
+release_sync_lock() {
+    [ -n "$SYNC_LOCK_PATH" ] || return 0
+    # Only remove it if it still names the PID we wrote -- guards against
+    # deleting a fresh lock some other process legitimately acquired after a
+    # stale-lock cleanup raced with us (see acquire_sync_lock()'s retry).
+    local current
+    current="$(cat "$SYNC_LOCK_PATH" 2>/dev/null || echo "")"
+    if [ "$current" = "$SYNC_LOCK_PID" ]; then
+        rm -f "$SYNC_LOCK_PATH"
+    fi
+    SYNC_LOCK_PATH=""
+}
+
+on_exit() {
+    cleanup_temp
+    release_sync_lock
+}
+trap on_exit EXIT
+
+# A trap registered only for EXIT already fires on receipt of INT/TERM too,
+# *as long as those signals have no trap of their own* -- bash still runs
+# the EXIT trap and then dies from the signal. But this repo already has a
+# real bug from assuming that generalizes: lib/daemon.sh used to register
+# `trap release_daemon_lock EXIT INT TERM` (one handler, all three signals),
+# and with an *explicit* trap on INT/TERM, bash runs the handler and then
+# RESUMES the script instead of dying -- the daemon survived the signal
+# having already released its lock, and a second daemon could then acquire
+# it while the first kept running. The fix there (lib/daemon.sh:197-198,
+# not touched by this file) was a *separate* INT/TERM trap whose handler
+# ends with `exit`. Mirror that fix here too, rather than relying on the
+# no-explicit-trap default above, so this stays correct even if some future
+# change to this file ever adds an INT/TERM trap elsewhere.
+trap 'on_exit; exit 130' INT
+trap 'on_exit; exit 143' TERM
 
 kcsync() {
     PYTHONPATH="$SCRIPT_DIR/lib" "$PYTHON_BIN" -m kcsync "$@"
@@ -410,11 +519,33 @@ merge_remote_refs() {
         log_info "Merging changes from $machine..." >&2
         # ${extra[@]+...} rather than "${extra[@]}": bash 3.2, still the system
         # bash on macOS, treats an empty array as unset under `set -u`.
+        #
+        # stdout must be discarded too, not just stderr: `git merge -q` still
+        # prints "Auto-merging <path>" to STDOUT for any path that needs a
+        # real content-level merge (which every db/**/*.jsonl row-merge does,
+        # per .gitattributes' merge=kcsync-rows). This function's own stdout
+        # is its return channel -- the caller does
+        # `result="$(merge_remote_refs)"` and then
+        # `read -r merged conflicted incompatible <<< "$result"` -- and
+        # `read` takes only the FIRST line of a multi-line value. A leaked
+        # "Auto-merging db/memory/episodic_memories.jsonl" line arrives
+        # before the real final `echo "$merged $conflicted $incompatible"`,
+        # so `read` bound merged/conflicted/incompatible to words of the
+        # leaked line instead, and the later `[ "$conflicted" -gt 0 ]` blew
+        # up with "integer expected". That comparison sitting inside an
+        # `if` meant the bad value was merely swallowed as "false" here --
+        # but the exact same corruption would have hidden a REAL conflict
+        # (conflicted=1 replaced by non-numeric garbage that also fails
+        # `-gt 0`), silently skipping report_conflicts()/show_unresolved()
+        # and proceeding to pack a half-merged repo. Verified by direct
+        # repro: two machines whose only overlap is an insert-only jsonl
+        # table (no real conflict) reproduced the "integer expected" text
+        # on 9 of 10 runs even though nothing here was otherwise flaky.
         if KCSYNC_STRATEGY="$STRATEGY" \
            KCSYNC_REPO="$SYNC_REPO" \
            KCSYNC_CONFLICT_LOG="$CONFLICT_LOG" \
            git_repo merge -q --no-edit ${extra[@]+"${extra[@]}"} \
-                -m "sync: merge $machine" "$ref" 2>/dev/null; then
+                -m "sync: merge $machine" "$ref" > /dev/null 2>&1; then
             merged=$((merged + 1))
         else
             if [ -n "$(git_repo ls-files -u)" ]; then
@@ -484,6 +615,7 @@ publish_bundle() {
 # --------------------------------------------------------------------------
 
 cmd_sync() {
+    acquire_sync_lock
     require_python
     ensure_repo
     : > "$CONFLICT_LOG"
@@ -561,6 +693,7 @@ cmd_sync() {
 }
 
 cmd_resume() {
+    acquire_sync_lock
     require_python
     ensure_repo
 
@@ -585,6 +718,7 @@ cmd_resume() {
 }
 
 cmd_push() {
+    acquire_sync_lock
     require_python
     ensure_repo
     log_info "Unpacking local state..."
@@ -609,6 +743,11 @@ cmd_push() {
 cmd_pull() {
     STRATEGY="remote-wins"
     log_info "Pull applies remote changes, preferring remote on conflict."
+    # No separate acquire_sync_lock() call: this runs cmd_sync() in the same
+    # process, which takes the lock itself. The lock is not reentrant, so
+    # acquiring it here too would make cmd_sync()'s own acquire_sync_lock()
+    # find our own PID already holding it, `kill -0` it as alive, and fail
+    # with "another sync is already running" against ourselves.
     cmd_sync
 }
 
@@ -766,7 +905,8 @@ Options:
 
 Exit codes:
   0   Success
-  1   Sync stopped; your data was not changed
+  1   Sync stopped; your data was not changed (includes: another sync,
+      push, resume, or pull is already running for this scope)
   3   Sync completed, but one or more machines stayed quarantined
 
 Environment variables:

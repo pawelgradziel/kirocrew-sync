@@ -22,15 +22,58 @@ ok()   { echo -e "  ${GREEN}PASS${NC} $*"; PASS=$((PASS + 1)); }
 bad()  { echo -e "  ${RED}FAIL${NC} $*"; FAIL=$((FAIL + 1)); }
 head_() { echo; echo -e "${YELLOW}== $*${NC}"; }
 
+# Two independent, both-verified bugs used to live in this pair of helpers.
+# Both had to be fixed to make "published scan is non-vacuous" (Scenario 6)
+# stop flaking between "58 passed / 1 failed" and "59 / 0" on identical code:
+#
+# 1. `echo "$2" | grep -q ...` under this script's `set -o pipefail` (line 9)
+#    races on SIGPIPE. `grep -q` exits the instant it finds a match, closing
+#    its read end; if `echo` is still mid-write when that happens, the
+#    kernel can (though will not always) deliver SIGPIPE to `echo` before it
+#    finishes, so `echo` itself exits 141 (128+SIGPIPE). With `pipefail`,
+#    THAT nonzero status -- not grep's 0-for-found -- becomes the pipeline's
+#    exit status, so `if echo ... | grep -q ...` can evaluate false even
+#    though the pattern was genuinely found. Whether it triggers depends on
+#    process scheduling, not on the data, which is exactly what "flaky"
+#    means. Verified directly: replaying one captured ~29KB scan through
+#    `echo "$X" | grep -aqF -- "chat-a.jsonl"` 50 times under `pipefail`
+#    returned 0 thirty-one times and 141 nineteen times -- same string, same
+#    pattern, no other variable changed. A here-string (`<<<`) sidesteps
+#    this entirely: bash fully materializes it (a temp file, in this bash)
+#    before the command ever starts reading, so there is no concurrent
+#    writer left to race -- confirmed 50/50 clean against the same input.
+#
+# 2. Separately, published_dump() (below) dumps raw git object content,
+#    which for this repo includes genuinely binary blobs (embeddings under
+#    blob/**, .gitattributes marks them `binary`). Without `-a`/`--text`,
+#    grep auto-detects "binary" input (a NUL byte, or in a UTF-8 locale an
+#    invalid encoding sequence) and silently stops matching -- and whether
+#    that triggers depends on which bytes land near the front of the stream,
+#    which depends on git's object-enumeration order, which shifts run to
+#    run because commit timestamps (real wall-clock, not fixed by any
+#    fixture --ts) perturb every object's SHA1 and thus its position in the
+#    loose-object store. Verified: replaying the exact same already-fetched
+#    bundles through `git cat-file --batch-all-objects` repeatedly landed
+#    grep on opposite sides of its own binary/text heuristic across
+#    different underlying object sets -- one captured scan matched
+#    "chat-a.jsonl" 6/6 with `grep -aqF`, 0/6 with plain `grep -qF`.
+#
+# Both bugs run in the "assertion reports failure on data that is actually
+# fine" direction for assert_contains, but the *opposite*, more dangerous
+# direction for assert_not_contains: every one of this suite's secret-leak
+# checks (no bot token / mcp token / local secret published) runs through
+# the same helper, so either bug could just as well have swallowed a real
+# leak by failing to find a pattern that was genuinely present. Fixing both
+# here, once, covers every caller.
 assert_contains() {
-    if echo "$2" | grep -qF -- "$3"; then ok "$1"; else
+    if grep -aqF -- "$3" <<< "$2"; then ok "$1"; else
         bad "$1"
         echo "      expected to find: $3"
     fi
 }
 
 assert_not_contains() {
-    if echo "$2" | grep -qF -- "$3"; then
+    if grep -aqF -- "$3" <<< "$2"; then
         bad "$1"
         echo "      should not contain: $3"
     else ok "$1"; fi
