@@ -188,7 +188,14 @@ cmd_daemon() {
         exit 1
     fi
     
-    trap release_daemon_lock EXIT INT TERM
+    # INT/TERM need their own handler that actually exits. A bare
+    # `trap release_daemon_lock INT TERM` runs the handler and then *resumes*
+    # the polling loop, so the daemon survives the signal having already
+    # deleted its own lock -- at which point a second daemon acquires the lock
+    # and both sync concurrently. The EXIT trap still covers ordinary exits;
+    # release_daemon_lock is `rm -f`, so running it twice is harmless.
+    trap release_daemon_lock EXIT
+    trap 'release_daemon_lock; exit 0' INT TERM
     
     # Initial state capture
     check_remote_changed || true
