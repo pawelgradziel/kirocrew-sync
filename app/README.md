@@ -237,6 +237,39 @@ What gets logged:
 variable (`DEBUG`, `INFO`, `WARNING`, `ERROR`, ...; default `INFO`). An
 unrecognized value falls back to `INFO` rather than preventing startup.
 
+**Background syncs log to `<data dir>/cron.log`, not `backend.log`.** The cron
+entry point (`backend/cli.py`, see Background sync below) runs as its own
+short-lived process every 5 minutes while the backend server keeps running, and
+two processes must not share one rotating file handler — whichever one rotates
+renames the file out from under the other, which then keeps appending to an
+orphaned inode until its own rotation, losing log segments. Same directory,
+same format, same level variable; look there when a background tick did
+something unexpected.
+
+## Background sync
+
+The `sync-daemon` cron declared in `app.json` runs `backend/cli.py` — a plain
+`python3` entry point that runs a sync and records it exactly as
+`POST /api/sync` does (history row, conflict/quarantine ingestion,
+`daemon_state`, notifications), in-process and with no HTTP hop. Both entry
+points call the same `sync_runner.run_sync_and_record()`, so a background tick
+and a "Sync Now" click leave identical state behind.
+
+It exists because a cron entry cannot authenticate to this app's own HTTP API:
+`command` crons are vetted against command substitution (so they cannot mint a
+gateway token) and `script` crons must live outside the app package. Having the
+cron call `kirocrew-sync.sh` directly instead — the previous arrangement —
+synced for real but recorded nothing, so the dashboard stayed empty until
+someone clicked "Sync Now". See `docs/kirocrew-app-summary.md` → "Background
+Crons" for the full rationale, and `backend/cli.py`'s module docstring for the
+runtime constraints (absolute paths, per-app venv, timeout headroom).
+
+Runnable by hand, which is the quickest way to see what a tick actually does:
+
+```bash
+~/.kiro/crew/apps/kirocrew-sync/.venv/bin/python3 ~/.kiro/crew/apps/kirocrew-sync/backend/cli.py --strategy auto
+```
+
 ## Architecture
 
 ```
@@ -250,6 +283,8 @@ unrecognized value falls back to `INFO` rather than preventing startup.
 │   ├── database.py              # SQLite schema, init/reset
 │   ├── models.py                # Pydantic request/response models
 │   ├── sync_manager.py          # Wraps the kirocrew-sync bash engine
+│   ├── sync_runner.py           # Run-a-sync-and-record-it path shared by the HTTP route and the cron CLI
+│   ├── cli.py                   # HTTP-free cron entry point — see Background sync above
 │   ├── history.py               # Sync history persistence
 │   ├── conflicts.py             # Conflict persistence/resolution
 │   ├── quarantine.py            # Quarantine persistence
@@ -276,7 +311,8 @@ unrecognized value falls back to `INFO` rather than preventing startup.
 │       └── shared.tsx            # Small pieces shared across the panels above (inline message banner, loading/error/code-pill helpers)
 └── data/
     ├── history.db                # Sync history database
-    └── backend.log                # Rotating backend request/error log — see Logging below
+    ├── backend.log                # Rotating backend request/error log — see Logging above
+    └── cron.log                   # Rotating log for background (cron) syncs — see Logging above
 ```
 
 `ui/package.json`, `ui/esbuild.config.mjs`, `ui/tsconfig.json` and `ui/types/` are build-time only (dev dependencies, editor types) — none of them are needed on the machine the app runs on, and `ui/node_modules/` is gitignored and never copied by `install-app.sh`.

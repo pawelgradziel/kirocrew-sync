@@ -143,7 +143,7 @@ Defined in `app.json`, visible in dashboard Jobs list:
     {
       "name": "sync-daemon",
       "every": 300,
-      "command": "\"$HOME/.kiro/crew/workspace/kirocrew-sync/kirocrew-sync.sh\" sync --strategy auto",
+      "command": "\"$HOME/.kiro/crew/apps/kirocrew-sync/.venv/bin/python3\" \"$HOME/.kiro/crew/apps/kirocrew-sync/backend/cli.py\" --strategy auto",
       "silent": true,
       "enabled": true
     }
@@ -157,38 +157,66 @@ agent session every 5 minutes: it burns tokens and fails outright whenever the
 selected model is temporarily unavailable, and every tick re-asks for tool
 approvals a prior tick's approval doesn't carry over to (no session memory
 between ticks), which was the single most annoying thing about running the app.
-`command` bypasses the LLM entirely — the gateway runs `kirocrew-sync.sh sync`
-as a plain sandboxed subprocess on the timer, matching the "zero tokens"
-script-based `contrib/kirocrew-cron/sync_daemon.py` integration this app was
-meant to replace, not regress from.
+`command` bypasses the LLM entirely — the gateway runs the job as a plain
+sandboxed subprocess on the timer, matching the "zero tokens" script-based
+`contrib/kirocrew-cron/sync_daemon.py` integration this app was meant to
+replace, not regress from.
 
-Two things this move gives up, both worth knowing before relying on it:
+**Why it calls `backend/cli.py` rather than `kirocrew-sync.sh`.** A cron entry
+cannot authenticate to this app's own `/api/sync` route. The `command` field is
+vetted at authoring time (`kiro_crew.mcp_cron._vet_shell_command`) and
+categorically refuses command substitution (`` $(...) ``, backticks), so a cron
+command cannot mint the gateway token or read `~/.kiro/crew/.local_secret` the
+way `install-app.sh` does — that vetting exists specifically to stop a cron from
+exfiltrating credentials, and is not something to route around. `script` crons
+run unrestricted Python, but the file must live under `~/.kiro/crew/crons/` —
+outside this app's own package — with no manifest mechanism to place one there.
 
-- **`command`/`script` cron entries cannot authenticate to this app's own
-  `/api/sync` route.** The `command` field is vetted at authoring time
-  (`kiro_crew.mcp_cron._vet_shell_command`) and categorically refuses command
-  substitution (`` $(...) ``, backticks), so a cron command cannot mint the
-  gateway token or read `~/.kiro/crew/.local_secret` the way `install-app.sh`
-  does — that vetting exists specifically to stop a cron from exfiltrating
-  credentials, and is not something to route around. `script` crons run
-  unrestricted Python, but the file must live under
-  `~/.kiro/crew/crons/` — outside this app's own package — with no manifest
-  mechanism to place one there. So the cron now calls `kirocrew-sync.sh`
-  directly (same script, same `config.sh`, same default `sync_dir` as
-  `SyncManager` already uses — see `app/backend/sync_manager.py`) instead of
-  going through the backend's HTTP API.
-- **Consequently, cron-triggered runs do not populate the dashboard.** The
-  History Timeline, Conflicts/Quarantine panels, and the notification
-  channels below are all populated by `server.py`'s `POST /api/sync` handler
-  (`history_mgr.record_sync`, artifact ingestion, `_send_sync_notifications`)
-  — not by anything `kirocrew-sync.sh` writes on its own. A background tick
-  syncs the data for real (three-way merge, conflict resolution, quarantine
-  handling all still happen), but the dashboard only reflects it after the
-  user hits "Sync Now" (which does go through `/api/sync`). Closing this gap
-  needs a small backend-owned entry point that runs
-  `SyncManager.run_sync()` + `HistoryManager.record_sync()` + the
-  notification calls in-process, with no HTTP hop and therefore no auth
-  problem — out of scope for this change (see `app/backend/**`).
+An earlier revision therefore had the cron shell straight into
+`kirocrew-sync.sh sync`. That synced correctly but recorded nothing: the History
+Timeline, Conflicts/Quarantine panels and the notification channels below are
+populated by the *backend*, not by anything `kirocrew-sync.sh` writes on its
+own, so a background tick was invisible until the user hit "Sync Now".
+
+The way out is that the vetting constrains the **shell command string**, not
+what the process that string launches then does. `backend/cli.py` is a plain
+`python3` entry point that calls `sync_runner.run_sync_and_record()` — the very
+same function `POST /api/sync` calls — directly against the same SQLite
+database, in-process, with no HTTP hop and therefore no auth to solve. A cron
+tick and a "Sync Now" click now leave identical state behind, from one shared
+implementation rather than two that could drift.
+
+Details worth knowing:
+
+- The command names the interpreter and the script by **absolute
+  `$HOME`-rooted paths**. A command cron runs via `sh -c` inheriting the
+  *gateway's* working directory (`cron_script.run_command_sandboxed` passes no
+  `cwd`) and a scrubbed environment, so neither cwd nor `PYTHONPATH` can be
+  relied on; `cli.py` bootstraps its own `sys.path` to match.
+- It uses the **per-app venv** (`.venv/bin/python3`, built by the gateway from
+  `requirements.txt`), not a bare `python3` — the backend's models need
+  `pydantic`, which a system interpreter may not have.
+- `cli.py` defaults to a **240s engine timeout**, deliberately under the 300s
+  ceiling the gateway applies to a command cron. At 300 the two deadlines race
+  and the gateway's kill wins, leaving nothing recorded — the exact
+  invisibility this design fixes. Timing out first turns it into a recorded,
+  notified failure instead.
+- Engine **exit code 3** ("synced, but machines stayed quarantined") maps to a
+  cron exit of 0. It is success under the app's `(0, 3)` contract, and is
+  surfaced through the quarantine panel and notification channel; reporting it
+  as failure would auto-pause a healthy job after five ticks.
+- `cli.py` logs to **`<data dir>/cron.log`**, not `backend.log`: the server is
+  long-lived and the cron process is spawned fresh every tick, and two
+  processes sharing one rotating file handler lose log segments when either
+  one rotates.
+
+Known limitation: `NotificationService` dedups repeats within a 5-minute
+window, but that window lives in process memory — and the cron process exits
+immediately, so it never suppresses anything there. Quarantine is deduped
+against the database and conflict/completed notifications key off per-run ids,
+so in practice only a *persistently* failing sync re-notifies every tick.
+Fixing it properly means database-backed dedup inside `NotificationService`, so
+both entry points benefit.
 
 User can pause/resume from:
 - Jobs list in dashboard

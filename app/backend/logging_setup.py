@@ -38,7 +38,7 @@ LOG_LEVEL_ENV = "KIROCREW_SYNC_LOG_LEVEL"
 
 LOG_FILE_NAME = "backend.log"
 
-# The cron entry point (backend/cron_entry.py) writes here instead of
+# The cron entry point (backend/cli.py) writes here instead of
 # backend.log. Two processes must NOT share one RotatingFileHandler: rotation
 # renames the file out from under whichever process did not trigger it, which
 # then keeps appending to the now-orphaned inode until its own rotation, so

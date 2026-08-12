@@ -3,7 +3,6 @@ FastAPI server for KiroCrew Sync app.
 """
 
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Optional, Tuple
