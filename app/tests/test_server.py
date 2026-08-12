@@ -112,6 +112,36 @@ def client(app_env):
 
 
 # ---------------------------------------------------------------------------
+# GET /health -- gateway liveness probe (backend.healthCheck)
+# ---------------------------------------------------------------------------
+#
+# The gateway polls this endpoint after spawning the backend and only starts
+# proxying /api/apps/kirocrew-sync/* traffic to it once /health responds
+# with a non-error status (see kiro_crew.apps.backend._health_check_loop /
+# get_app_backend_port upstream). It must respond even with no sync engine,
+# no history, and a database that hasn't been touched.
+
+def test_health_returns_200_ok(app_env, client):
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+
+
+def test_health_does_not_touch_sync_engine_or_database(app_env, client, monkeypatch):
+    """/health must stay a pure liveness probe: it is polled in a loop for
+    the lifetime of the app and must not depend on -- or be slowed down or
+    broken by -- the sync engine or the database."""
+    def _boom(*args, **kwargs):
+        raise AssertionError("/health must not touch the sync engine")
+
+    monkeypatch.setattr(server_module.sync_mgr, "is_running", _boom)
+    monkeypatch.setattr(server_module.history_mgr, "get_last_sync", _boom)
+
+    resp = client.get("/health")
+    assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
 # Finding 1: blocking work must not freeze the event loop
 # ---------------------------------------------------------------------------
 

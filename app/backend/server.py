@@ -85,6 +85,28 @@ def _internal_error(where: str, exc: Exception) -> HTTPException:
 
 
 # ---------------------------------------------------------------------------
+# /health
+# ---------------------------------------------------------------------------
+#
+# KiroCrew's gateway polls this endpoint (backend.healthCheck, default
+# "/health") in a background loop right after spawning the backend process,
+# and only starts proxying /api/apps/kirocrew-sync/* traffic to us once it
+# responds with a non-error status (see _health_check_loop /
+# get_app_backend_port in the gateway's kiro_crew/apps/backend.py). It is
+# polled repeatedly for the lifetime of the app, so the handler must stay
+# trivially cheap and must NEVER touch the database, the sync engine, or any
+# subprocess -- unlike /status (which does), this can't be allowed to block
+# or fail because of something unrelated to "is the process alive".
+
+@app.get("/health")
+async def get_health():
+    """Liveness probe. Always returns 200 with a static body if the process
+    is up enough to handle a request -- deliberately does not check the
+    database, the sync engine, or any external command."""
+    return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
 # Notifications
 # ---------------------------------------------------------------------------
 

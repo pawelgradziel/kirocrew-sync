@@ -71,6 +71,51 @@ def _fake_home(tmp_path, monkeypatch):
     return fake_home
 
 
+@pytest.fixture(autouse=True)
+def _no_real_notifications(tmp_path, monkeypatch):
+    """Make it impossible for a test to reach the live notification API.
+
+    This is not hypothetical. ``notifications.py`` resolves
+    ``_APP_SECRET_PATH`` from ``Path.home()`` at MODULE IMPORT time, which
+    happens before ``_fake_home`` can patch ``Path.home`` -- so the constant
+    keeps pointing at the real ``~/.kiro/crew/apps/kirocrew-sync/.app_secret``
+    no matter what that fixture does. While no such secret existed the
+    transport resolved to "unavailable" and every notify_* call was a silent
+    no-op, which is why this went unnoticed. The moment the app was installed
+    properly by the gateway, that secret appeared -- and running the suite
+    posted the test fixtures ("boom", "python3 is not installed",
+    knowledge/row-2, ...) into the user's real KiroCrew inbox as genuine
+    notifications.
+
+    Two layers, mirroring the module docstring's approach:
+
+    1. Repoint ``_APP_SECRET_PATH`` at a path that cannot exist, so transport
+       resolution fails closed, and clear the module-level singleton so a
+       service cached by an earlier test (possibly holding a real secret and
+       a live token) cannot leak into this one.
+    2. Replace the low-level HTTP call with a hard failure. Any code path that
+       still tries to talk to the gateway becomes a loud test error instead of
+       a silent real-world side effect.
+    """
+    try:
+        import backend.notifications as notifications_module
+    except Exception:  # notifications not importable in this context -- nothing to guard
+        return
+
+    monkeypatch.setattr(
+        notifications_module, "_APP_SECRET_PATH", tmp_path / "no-such-app-secret"
+    )
+    monkeypatch.setattr(notifications_module, "_default_service", None, raising=False)
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError(
+            "a test attempted a real HTTP call to the KiroCrew notification API; "
+            "mock the transport instead of reaching the live gateway"
+        )
+
+    monkeypatch.setattr(notifications_module, "_http_post_json", _forbidden)
+
+
 @pytest.fixture
 def db_path(tmp_path) -> Path:
     """A fresh, never-yet-created sqlite path under the test's tmp_path."""

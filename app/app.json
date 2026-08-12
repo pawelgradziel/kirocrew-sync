@@ -47,7 +47,8 @@
     ]
   },
   "backend": {
-    "entryPoint": "backend.server:app"
+    "entryPoint": "backend/server.py",
+    "type": "asgi"
   },
   "crons": [
     {

@@ -38,9 +38,22 @@ The script tries two paths, in order:
    backend; only a running gateway does that, the next time you enable the
    app from its dashboard.
 
+Either way, once the app files are in place at their installed location the
+script also provisions a dedicated backend virtualenv there
+(`<installed app dir>/.venv`) and installs `requirements.txt`
+(fastapi/uvicorn/pydantic) into it. This is required: the app's backend runs
+as an ASGI process under `uvicorn`, and the gateway only uses its own bundled
+interpreter as a fallback when no such venv is present — that interpreter
+does **not** carry fastapi/uvicorn/pydantic, so without this step the backend
+would fail to start as soon as it's enabled. If venv creation or the
+dependency install fails (no network, no `python3-venv`), the script removes
+whatever it managed to build rather than leaving a half-working venv behind,
+and prints the exact commands to finish the setup by hand.
+
 Either way, re-running the script is safe: it overwrites app files but
-preserves sync history, the original `installedAt` timestamp, and an
-already-generated `.app_secret`.
+preserves sync history, the original `installedAt` timestamp, an
+already-generated `.app_secret`, and an already-working backend venv (it's
+only rebuilt if missing or missing a required package).
 
 **Important:** installing (through either path) does not enable the app.
 Third-party app execution is denied by default, so its backend and crons

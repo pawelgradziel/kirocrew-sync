@@ -280,6 +280,83 @@ print_trust_and_enable_steps() {
 }
 
 # ---------------------------------------------------------------------------
+# Backend virtualenv
+# ---------------------------------------------------------------------------
+#
+# The gateway spawns an ASGI-type app backend (backend.type: "asgi" in
+# app.json) with:
+#     <app dir>/.venv/bin/python3   — if that file exists
+#     else the gateway's own bundled interpreter
+# The gateway's bundled interpreter does NOT have fastapi/uvicorn/pydantic
+# installed (it's the gateway's own runtime, not ours), so without a venv
+# here the backend dies at import time. This MUST run against the INSTALLED
+# app directory ($APP_DEST_DIR), after files are already in place there —
+# never against $APP_SRC_DIR, since a machine-specific venv must not live in
+# (or be copied out of) the repo's source tree.
+#
+# Called after BOTH install paths: the offline path copies files itself, and
+# the gateway-API path has the gateway do the copy, so either way this must
+# run only once the destination directory is known to exist and be current.
+provision_venv() {
+    local dest="$1"
+    local req="$dest/requirements.txt"
+    local venv_dir="$dest/.venv"
+
+    if [ ! -f "$req" ]; then
+        log_warn "No requirements.txt at $req — skipping backend venv setup."
+        log_warn "The backend needs fastapi/uvicorn/pydantic; without them it will not start."
+        return 1
+    fi
+
+    if [ -x "$venv_dir/bin/python3" ] \
+        && "$venv_dir/bin/python3" -c 'import fastapi, uvicorn, pydantic' >/dev/null 2>&1; then
+        log_info "Backend venv already present with required packages — leaving it as is."
+        return 0
+    fi
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        log_error "python3 not found — cannot create the backend venv."
+        return 1
+    fi
+
+    log_info "Creating backend virtualenv at $venv_dir..."
+    rm -rf "$venv_dir"
+    if ! python3 -m venv "$venv_dir" >/dev/null 2>&1; then
+        log_error "Failed to create the backend virtualenv (the python3-venv package may"
+        log_error "not be installed)."
+        rm -rf "$venv_dir"
+        log_error "The backend will fall back to the gateway's own interpreter, which does"
+        log_error "NOT have fastapi/uvicorn/pydantic and will fail to start. Install the venv"
+        log_error "module (e.g. 'apt install python3-venv' / 'dnf install python3-venv') and"
+        log_error "re-run ./install-app.sh, or run manually:"
+        log_error "  python3 -m venv $venv_dir && $venv_dir/bin/python3 -m pip install -r $req"
+        return 1
+    fi
+
+    log_info "Installing backend dependencies (fastapi, uvicorn, pydantic)..."
+    local pip_log
+    pip_log="$(mktemp)"
+    if ! "$venv_dir/bin/python3" -m pip install --quiet --disable-pip-version-check \
+        -r "$req" >"$pip_log" 2>&1; then
+        log_error "Failed to install backend dependencies into $venv_dir:"
+        tail -n 20 "$pip_log" >&2
+        rm -f "$pip_log"
+        rm -rf "$venv_dir"
+        log_error "Removed the incomplete venv rather than leaving it behind — a half-built"
+        log_error "venv would be preferred over the gateway's own interpreter and the backend"
+        log_error "would fail with confusing missing-package errors instead of falling back"
+        log_error "cleanly. Check your network connection and re-run ./install-app.sh, or run"
+        log_error "manually:"
+        log_error "  python3 -m venv $venv_dir && $venv_dir/bin/python3 -m pip install -r $req"
+        return 1
+    fi
+    rm -f "$pip_log"
+
+    log_success "Backend virtualenv ready at $venv_dir"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Offline fallback: stage files + write correct installed.json ourselves
 # ---------------------------------------------------------------------------
 
@@ -374,6 +451,10 @@ PYEOF
         log_info "App secret already present — left untouched"
     fi
 
+    log_info "Setting up backend virtualenv..."
+    local venv_ok=1
+    provision_venv "$APP_DEST_DIR" || venv_ok=0
+
     echo
     log_success "KiroCrew Sync app staged at $APP_DEST_DIR"
     echo
@@ -382,6 +463,10 @@ PYEOF
     echo "but it could NOT register agents/skills/crons or start the backend;"
     echo "only a running gateway can do that."
     echo
+    if [ "$venv_ok" -eq 0 ]; then
+        log_warn "Backend venv setup failed (see above) — the backend will NOT start until"
+        log_warn "this is fixed, even after you Enable the app from the dashboard."
+    fi
     print_trust_and_enable_steps
 }
 
@@ -406,8 +491,21 @@ do_install() {
         log_info "KiroCrew gateway detected at $GATEWAY_BASE"
         if install_via_gateway; then
             echo
+            # The gateway API call above did the file copy into $APP_DEST_DIR;
+            # the venv is machine-specific and the gateway does not create it,
+            # so it must be provisioned here, against the destination it just
+            # wrote to, before the app is ever enabled and its backend spawned.
+            log_info "Setting up backend virtualenv..."
+            local venv_ok=1
+            provision_venv "$APP_DEST_DIR" || venv_ok=0
+            echo
             log_success "KiroCrew Sync app installed."
             echo
+            if [ "$venv_ok" -eq 0 ]; then
+                log_warn "Backend venv setup failed (see above) — the backend will NOT start"
+                log_warn "until this is fixed, even after you Enable the app from the dashboard."
+                echo
+            fi
             print_trust_and_enable_steps
             return
         fi
