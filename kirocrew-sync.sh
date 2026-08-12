@@ -38,9 +38,21 @@ if [ -f "$CONFIG_FILE" ]; then
     # shellcheck source=/dev/null
     source "$CONFIG_FILE"
 else
-    log_warn "Config file not found at $CONFIG_FILE"
-    log_info "Run: ./kirocrew-sync.sh init"
-    exit 1
+    # `init` is what CREATES config.sh, and `help` must work before anything is
+    # set up at all -- so requiring the config here made both unreachable and
+    # turned the message below into a catch-22: it told you to run `init`, and
+    # this same guard then refused to run it. Every other command genuinely
+    # needs the config, so they still stop here. The defaults below
+    # (BACKEND=gdrive, KIROCREW_DIR=$HOME/.kiro/crew) are enough for init and
+    # help to work unconfigured.
+    case "${1:-}" in
+        init|help|--help|-h) ;;
+        *)
+            log_warn "Config file not found at $CONFIG_FILE"
+            log_info "Run: ./kirocrew-sync.sh init"
+            exit 1
+            ;;
+    esac
 fi
 
 BACKEND="${ENV_SYNC_BACKEND:-${SYNC_BACKEND:-gdrive}}"
@@ -53,10 +65,6 @@ if [ ! -f "$BACKEND_FILE" ]; then
 fi
 # shellcheck source=/dev/null
 source "$BACKEND_FILE"
-
-# Source daemon implementation
-# shellcheck source=lib/daemon.sh
-source "$SCRIPT_DIR/lib/daemon.sh"
 
 # Path portability: knowledge-base paths are rewritten to a machine-independent
 # form on the way out and back to this machine's paths on the way in, so folder
@@ -90,6 +98,15 @@ scope_paths() {
     fi
 }
 scope_paths
+
+# Source daemon implementation. Must come AFTER SYNC_ROOT is set: lib/daemon.sh
+# derives DAEMON_STATE/DAEMON_LOCK from it at *source* time, so sourcing it any
+# earlier aborted the whole script under `set -u` with
+# "lib/daemon.sh: line 31: SYNC_ROOT: unbound variable" -- on every command,
+# not just `daemon`. Nothing above this point calls into daemon.sh; its
+# functions are only reached from the dispatch table at the end.
+# shellcheck source=lib/daemon.sh
+source "$SCRIPT_DIR/lib/daemon.sh"
 
 STRATEGY="auto"
 DRY_RUN=false
