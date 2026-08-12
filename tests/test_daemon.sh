@@ -153,30 +153,26 @@ fi
 
 # Test 8: State file created for change tracking
 #
-# KNOWN PRE-EXISTING FAILURE, out of scope for this file to fix: this
-# asserts that check_remote_changed() (lib/daemon.sh) successfully writes
-# $DAEMON_STATE, which only happens when its call to `backend_list`
-# succeeds. `backend_list` is called at lib/daemon.sh:~240 but is never
-# defined anywhere -- not in backends/local.sh (the backend this test
-# suite uses), nor s3.sh/gdrive.sh/rsync.sh, nor anywhere in this
-# repository's git history (verified via `git log --all -p -- '*.sh' |
-# grep backend_list`: the only match, ever, is the call site itself). Every
-# invocation therefore hits bash's "command not found", which the `2>/dev/null
-# || echo ""` around it silently swallows, so check_remote_changed() always
-# returns 2 ("cannot reach backend") -- forever, for every backend, since
-# the daemon's original commit (d490ef4). This is not a regression from
-# this session's changes (reproduces identically on unmodified master with
-# only the `set -e`-safety fixes elsewhere in this file applied -- those
-# were required just to let the test framework reach this assertion at
-# all, rather than aborting on the first one it hit). The consequence is
-# larger than this one assertion: every idle daemon_cycle takes the
-# "Backend unreachable, will retry" branch instead of the intended "no
-# changes, sleep at the idle interval" one, so the adaptive polling this
-# daemon advertises never actually reaches its idle state. Fixing it
-# requires a real backend_list implementation per backend (local.sh,
-# s3.sh, gdrive.sh, rsync.sh) -- outside this task's ownership (lib/daemon.sh,
-# docs/daemon.md, tests/test_daemon.sh only); flagged separately rather than
-# fixed here.
+# Was a KNOWN PRE-EXISTING FAILURE: this asserts that check_remote_changed()
+# (lib/daemon.sh) successfully writes $DAEMON_STATE, which only happens
+# when its call to `backend_list` succeeds. `backend_list` used to be
+# called at lib/daemon.sh:~240 but was never defined anywhere -- not in
+# backends/local.sh (the backend this test suite uses), nor
+# s3.sh/gdrive.sh/rsync.sh, nor anywhere in this repository's git history
+# before now. Every invocation hit bash's "command not found", which the
+# `2>/dev/null || echo ""` around it silently swallowed, so
+# check_remote_changed() always returned 2 ("cannot reach backend") --
+# forever, for every backend, since the daemon's original commit
+# (d490ef4). The consequence was larger than this one assertion: every
+# idle daemon_cycle took the "Backend unreachable, will retry" branch
+# instead of the intended "no changes, sleep at the idle interval" one, so
+# the adaptive polling this daemon advertises never actually reached its
+# idle state.
+#
+# Fixed by adding a real backend_list() to each of local.sh/gdrive.sh/
+# s3.sh/rsync.sh (see backends/local.sh for the fingerprint contract they
+# all share, and tests/test_backend_local_list.sh for a dedicated test of
+# it -- only local.sh is testable here without real remote credentials).
 timeout 3 ./kirocrew-sync.sh daemon >/tmp/daemon-test3.log 2>&1 &
 DAEMON_PID=$!
 sleep 2
@@ -194,13 +190,12 @@ DAEMON_PID=""
 # reads its configured polling interval from its sqlite database when
 # possible. These exercise that directly, by sourcing lib/daemon.sh into an
 # isolated subshell against a fake app tree -- not by running a full daemon
-# cycle end-to-end. That's deliberate, not just convenient: check_remote_changed()
-# always returns 2 ("cannot reach backend") because of the pre-existing
-# backend_list bug documented above Test 8, so daemon_cycle() always takes
-# its early "Backend unreachable" return and never reaches should_sync_now()
-# or the sync-dispatch code at all in a real daemon run -- Tests 1-8 above
-# never exercise it. Testing these functions directly is the only way to
-# cover them until that separate bug is fixed.
+# cycle end-to-end. That remains the simplest way to cover
+# run_sync_via_app()/read_app_interval()/refresh_effective_intervals() in
+# isolation, independent of whatever check_remote_changed() and
+# should_sync_now() decide on a given tick, without needing a live
+# KiroCrew app process or a real sqlite-backed daemon_state table wired
+# into a running daemon.
 
 printf "\n${YELLOW}Testing: App integration${NC}\n\n"
 

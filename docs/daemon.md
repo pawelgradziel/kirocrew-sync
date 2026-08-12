@@ -347,19 +347,26 @@ installed and its dashboard interval is readable (see
 minutes as the idle baseline and the other two intervals are rescaled
 around it, not fixed at 30s/10min regardless of the configured value.
 
-## Known Limitations
+## How idle detection works
 
-**Idle detection can be less reliable than the table above implies.** The
-"No changes detected" row depends on a fast, no-merge check against the
-storage backend; when that check can't reach the backend, the daemon
-currently cannot always tell "genuinely nothing changed" apart from "could
-not check" and treats it as the latter (the "Sync failed or conflicted"
-backoff cadence), rather than settling into the idle cadence. If you
-notice your daemon logging "Backend unreachable" continuously even though
-the backend is healthy and reachable by other means (`kirocrew-sync.sh
-status` works, manual `sync` works), this is why -- it is not specific to
-having the app installed, and is tracked separately from the app
-integration described in this document.
+The "No changes detected" row above depends on a fast, no-merge check
+against the storage backend: each backend implements `backend_list()`, a
+cheap fingerprint of the remote's published bundles (name, size, and
+modification time, sorted deterministically) that changes if and only if
+another machine has published since the last check. See
+[Custom Backends](backends/custom.md) for the exact contract, including
+how a backend distinguishes "reachable but nothing published yet" from
+"can't reach the backend at all" -- only the latter falls back to the
+"Sync failed or conflicted" backoff cadence instead of settling into idle.
+
+If you see your daemon logging "Backend unreachable" continuously even
+though the backend is healthy and reachable by other means
+(`kirocrew-sync.sh status` works, manual `sync` works), that points at
+`backend_list()` for your configured `SYNC_BACKEND` specifically -- check
+that the same credentials/tool (`rclone`/`aws`/`ssh`) it uses are
+available in the daemon's environment, which can differ from an
+interactive shell's (cron and systemd/launchd services often start with a
+minimal `PATH` and no SSH agent).
 
 ## Alternative: Cron (simpler, less adaptive)
 

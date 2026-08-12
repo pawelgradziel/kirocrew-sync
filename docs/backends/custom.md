@@ -6,7 +6,7 @@ works: Dropbox, OneDrive, WebDAV, a USB drive, an encrypted archive.
 
 ## The contract
 
-Create `backends/your-backend.sh` and implement three functions:
+Create `backends/your-backend.sh` and implement four functions:
 
 ```bash
 backend_push() {
@@ -21,6 +21,10 @@ backend_pull() {
 
 backend_status() {
     # Show backend status and configuration
+}
+
+backend_list() {
+    # Print a cheap, stable fingerprint of remote state; see below
 }
 ```
 
@@ -51,6 +55,45 @@ the top of the file becomes backend configuration.
 - Return non-zero on failure. Push stops there; pull failure only warns.
 - Exclude `*.lock` and `*.tmp` if your transport can, matching the other
   backends.
+
+### `backend_list`: the daemon's cheap change-detection fingerprint
+
+`lib/daemon.sh`'s background daemon polls `backend_list` on every tick (as
+often as every 30 seconds) instead of running a full sync, to decide
+whether anything is even worth syncing. It compares your output byte-for-
+byte against what it saved last time, so the contract is:
+
+- **Print a stable listing of the remote's `bundles/*.bundle` files** --
+  one line per bundle, e.g. `name size mtime`, **sorted deterministically**
+  (`LC_ALL=C sort`, not raw directory order, which the filesystem/API does
+  not guarantee is stable between calls).
+- Use data that only changes when the *content* changes: the bundle's own
+  size and modification time (as reported by the remote), never anything
+  derived from the time of the current query -- a query timestamp in the
+  fingerprint would make every single poll look like a change and defeat
+  the entire point.
+- **A reachable remote with nothing published yet is not the same as an
+  unreachable one.** Print a fixed, non-empty sentinel (the bundled
+  backends use the literal string `EMPTY`) for "reachable, zero bundles" --
+  this is the normal state before any machine's first push. Conflating it
+  with "unreachable" recreates, in a subtler form, the exact bug this
+  contract exists to prevent: see `backends/local.sh`'s `backend_list` for
+  the reasoning in full.
+- **On an unreachable remote (offline, bad auth, missing tool), print
+  nothing and return non-zero.** `check_remote_changed()` in
+  `lib/daemon.sh` treats empty output as "cannot reach backend" and backs
+  off, rather than treating a transient failure as "nothing changed".
+- Must be cheap and must not mutate the remote -- no uploads, no deletes,
+  ideally a single lightweight list/stat call. Do not call your
+  `check_*_configured`-style helpers that print multi-line setup
+  instructions and `exit`: that output would become part of the
+  fingerprint, and the `exit` bypasses the non-zero-return contract this
+  function needs. Use the same lightweight tool-presence check
+  (`command -v your-tool`) those helpers use, but return, don't exit.
+
+See `backends/local.sh`, `backends/gdrive.sh`, `backends/s3.sh`, and
+`backends/rsync.sh` for four different transports implementing the same
+contract, and `tests/test_backend_local_list.sh` for a test of it.
 
 ## Configuration
 

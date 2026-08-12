@@ -76,6 +76,60 @@ backend_pull() {
     fi
 }
 
+# Cheap fingerprint of remote state for the daemon's change-detection poll
+# (lib/daemon.sh: check_remote_changed()). See backends/local.sh for the
+# full contract this mirrors (sorted "name size mtime" lines, "EMPTY" for
+# reachable-but-nothing-published, empty stdout + non-zero for unreachable).
+#
+# Deliberately does NOT call check_rsync/check_rsync_configured: those
+# print multi-line setup instructions via log_* (which echo to *stdout*)
+# and exit 1 outright, which would make the instructions themselves the
+# fingerprint instead of tripping the indeterminate branch.
+#
+# One ssh round trip does both jobs at once: if bundles/ exists, list it
+# (name/size/mtime, via the remote's own `stat`); either way, print a
+# REMOTE_OK sentinel line once we know RSYNC_PATH itself is there, so an
+# empty result can be told apart from a dead connection. bundles/ not
+# existing yet (RSYNC_PATH exists, nothing published from any machine yet)
+# is EMPTY; RSYNC_PATH itself missing, or the ssh call failing outright
+# (bad host, auth, network), is unreachable -- matching what
+# check_rsync_configured already treats as "cannot access remote host".
+#
+# Portability note: this assumes a GNU-userland remote (`stat -c`), same as
+# the rest of this backend already does implicitly (its setup docs describe
+# a Linux host/NAS); it is not adapted for a BSD/macOS remote.
+backend_list() {
+    command -v ssh >/dev/null 2>&1 || return 1
+
+    local host="${RSYNC_HOST%%:*}"
+    local remote_cmd
+    remote_cmd="if [ -d '$RSYNC_PATH/bundles' ]; then \
+        find '$RSYNC_PATH/bundles' -maxdepth 1 -name '*.bundle' \
+            -exec stat -c '%n %s %Y' {} \; ; \
+        echo REMOTE_OK; \
+    elif [ -d '$RSYNC_PATH' ]; then \
+        echo REMOTE_OK; \
+    fi"
+
+    local output
+    output=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" "$remote_cmd" 2>/dev/null) || return 1
+
+    case "$output" in
+        *REMOTE_OK) ;;
+        *) return 1 ;;
+    esac
+
+    local listing
+    listing=$(printf '%s\n' "$output" | grep -v '^REMOTE_OK$')
+
+    if [ -z "$listing" ]; then
+        echo "EMPTY"
+        return 0
+    fi
+
+    printf '%s\n' "$listing" | LC_ALL=C sort
+}
+
 backend_status() {
     check_rsync
     

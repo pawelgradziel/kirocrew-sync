@@ -126,45 +126,51 @@ fixed. All three reproduce on `master` and were not introduced here:
 
 These are real gaps, deliberately recorded rather than hidden:
 
-1. **Daemon interval/scope config is decorative.** `lib/daemon.sh` hardcodes
-   `INTERVAL_IDLE/ACTIVE/BACKOFF` and never reads the app's `daemon_state`
-   table, so `PUT /daemon/config {"interval": N}` does not change what the
-   running daemon does. `next_sync` returns `null` rather than fabricating a
-   schedule the daemon does not follow, and the dashboard's interval slider
-   does not change the daemon's real cadence.
-2. **Syncs run by the bash daemon are still invisible to the app.** The app's
-   own cron records everything (it runs `backend/cli.py`, which shares the
-   sync-and-record path with `POST /api/sync`), but `kirocrew-sync.sh daemon`
-   writes nothing to the app's database, so a daemon-only user still sees
-   empty `/conflicts` and `/quarantine`.
-3. **`sync_changes` is never populated.** `GET /history/:id` always returns
-   `changes: []`, which the UI renders as "No detailed changes recorded for
-   this run". The table, model and CHECK constraints exist but nothing writes
-   to them, so per-run "what changed" is not available yet.
-4. **A SIGKILLed daemon can orphan a running sync.** `kirocrew-sync.sh` has no
-   lock of its own, so a sync it spawned survives. The API says so rather than
-   claiming a clean stop.
-5. **Syncs are refused while KiroCrew is actively writing.** Packing into
+1. **`sync_changes` detail is partial by design.** Populated now, but only
+   from what the engine genuinely reports: knowledge.db pack counts and
+   per-conflict records. `memory.db`'s pack count mixes `semantic_memory`
+   (lessons), `episodic_memories` (transcripts) and bookkeeping tables into
+   one number the engine never breaks down, so it is not attributed to any
+   `change_type`; conflicts on a bare `workspace/` path are likewise
+   unclassifiable and dropped. A run that only touched memory.db therefore
+   still shows no detail. That is a limit of the engine's output, not a bug.
+2. **A SIGKILLed daemon can still orphan a running sync.** The new per-scope
+   lock means a second sync will not start on top of the orphan, and says
+   which PID holds it — but the orphaned sync itself keeps running to
+   completion.
+3. **Syncs are refused while KiroCrew is actively writing.** Packing into
    databases KiroCrew has open risks corruption, so a sync backs off when any
    of KiroCrew's own `*.db` files changed in the last minute (our own subtrees
    — `$SYNC_ROOT` and `apps/` — are excluded, or a sync's own bookkeeping
    would block the next one). In practice KiroCrew falls quiet within ~20s,
    but a sync landing in a busy window fails and must be retried. Residual
    risk: a write beginning inside that one-minute window.
-6. **Replacing the app's cron requires deleting it by hand.** KiroCrew
+4. **Replacing the app's cron requires deleting it by hand.** KiroCrew
    registers app crons with `add_job_if_absent_async`, which never updates an
    existing job — so changing the cron in `app.json` has no effect on an
    already-installed app until the job is deleted in Schedule.
-7. **Notification dedup does not apply to cron runs.** The 5-minute window
-   lives in process memory and the cron process exits each tick. Quarantine
-   dedups against the database and conflict/completed notifications key off
-   per-run ids, so in practice only a persistently failing sync re-notifies
-   every tick. A proper fix is database-backed dedup.
-8. **Never run end-to-end against a real remote backend.** gdrive/s3/rsync
-   paths are exercised only against stubs and a local directory.
-9. **`iconPath` only resolves if published to a registry.** A side-loaded
+5. **Never run end-to-end against a real remote backend.** gdrive/s3/rsync are
+   exercised only against stubs and a local directory. This now includes their
+   `backend_list` fingerprints, which are syntax-checked and written against
+   each tool's documented behavior but never run against a live remote. The
+   rsync one additionally assumes GNU `stat` on the remote host.
+6. **`iconPath` only resolves if published to a registry.** A side-loaded
    install has no route serving an app's own `ui/` dir; the lucide `icon`
    name is what actually renders in the nav.
+7. **`SyncManager.is_running()` is machine-wide.** It shells out to
+   `pgrep -f "kirocrew-sync.sh sync"` with no scoping, so any matching sync
+   anywhere on the machine — another scope, another checkout — reads as "a
+   sync is already in progress". The new per-scope lock is the accurate
+   signal; this check is the coarse one.
+
+### Closed since the first pass
+
+Recorded because the reasoning is worth keeping: daemon interval config is no
+longer decorative (the daemon reads the app's `daemon_state`); daemon runs are
+no longer invisible (it delegates to `backend/cli.py`, so a tick records and
+notifies exactly like "Sync Now"); notification dedup is database-backed and
+now survives the cron process exiting each tick; `sync_changes` is populated;
+and the UI, once unbuildable, renders.
 
 ### Diagnosing it
 

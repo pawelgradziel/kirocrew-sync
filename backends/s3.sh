@@ -83,6 +83,43 @@ backend_pull() {
     fi
 }
 
+# Cheap fingerprint of remote state for the daemon's change-detection poll
+# (lib/daemon.sh: check_remote_changed()). See backends/local.sh for the
+# full contract this mirrors (sorted "name size mtime" lines, "EMPTY" for
+# reachable-but-nothing-published, empty stdout + non-zero for unreachable).
+#
+# Deliberately does NOT call check_aws_cli/check_s3_configured: those print
+# multi-line setup instructions via log_* (which echo to *stdout*) and
+# exit 1 outright, which would make the instructions themselves the
+# fingerprint instead of tripping the indeterminate branch. Same
+# command -v check check_aws_cli uses, just without the printing/exit.
+backend_list() {
+    command -v aws >/dev/null 2>&1 || return 1
+
+    # `aws s3 ls` on a prefix already gives name/size/date/time per object
+    # in one call (same shape backend_status already parses below) --
+    # date/time here are the object's own LastModified, not query time.
+    # Unlike a real filesystem, S3 has no directories to be "missing": `ls`
+    # on a bucket that exists but has zero matching keys still exits 0 with
+    # empty output, so a bare non-zero exit here is unambiguously "bucket
+    # unreachable" (bad credentials, wrong bucket, network down) and empty
+    # output alone (with rc=0) is unambiguously "reachable, nothing
+    # published yet" -- no separate reachability probe needed.
+    local listing
+    listing=$(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/bundles/" \
+        --profile "$AWS_PROFILE" 2>/dev/null) || return 1
+
+    local bundles
+    bundles=$(printf '%s\n' "$listing" | awk '/\.bundle$/ {print $4, $3, $1, $2}')
+
+    if [ -z "$bundles" ]; then
+        echo "EMPTY"
+        return 0
+    fi
+
+    printf '%s\n' "$bundles" | LC_ALL=C sort
+}
+
 backend_status() {
     check_aws_cli
     

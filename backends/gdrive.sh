@@ -115,6 +115,47 @@ backend_pull() {
     fi
 }
 
+# Cheap fingerprint of remote state for the daemon's change-detection poll
+# (lib/daemon.sh: check_remote_changed()). See backends/local.sh for the
+# full contract this mirrors (sorted "name size mtime" lines, "EMPTY" for
+# reachable-but-nothing-published, empty stdout + non-zero for unreachable).
+#
+# Deliberately does NOT call check_rclone/check_gdrive_configured: those
+# print multi-line setup instructions via log_* (which echo to *stdout*),
+# and exit 1 outright. Called from $(backend_list ...) that's merely
+# subshell-contained, not "clean failure" -- it would make the instructions
+# themselves the fingerprint, and the fingerprint would look stable and
+# "reachable" instead of tripping the indeterminate branch. Same command-v
+# check check_rclone uses, just without the printing/exit side effects.
+backend_list() {
+    command -v rclone >/dev/null 2>&1 || return 1
+
+    # rclone lsf's own "pst" format is exactly path/size/modtime -- no need
+    # to shell out to `stat`, and modtime here is the object's remote
+    # metadata, not this query's wall-clock time.
+    local listing rc
+    listing=$(rclone lsf "${GDRIVE_REMOTE_NAME}:${GDRIVE_SYNC_DIR}/bundles" \
+        --files-only --include '*.bundle' \
+        --format "pst" --separator " " 2>/dev/null)
+    rc=$?
+
+    if [ $rc -ne 0 ] || [ -z "$listing" ]; then
+        # rclone lsf fails when the bundles/ (or GDRIVE_SYNC_DIR) path
+        # doesn't exist yet, which is simply "nothing published yet" on a
+        # remote that otherwise works fine (true before any machine's
+        # first push). Disambiguate from a genuinely unreachable remote
+        # (bad auth, network down, remote not configured) with a second,
+        # cheap probe against the remote's root.
+        if rclone lsd "${GDRIVE_REMOTE_NAME}:" >/dev/null 2>&1; then
+            echo "EMPTY"
+            return 0
+        fi
+        return 1
+    fi
+
+    printf '%s\n' "$listing" | LC_ALL=C sort
+}
+
 backend_status() {
     check_rclone
     
