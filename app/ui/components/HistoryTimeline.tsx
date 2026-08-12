@@ -4,7 +4,7 @@ import { Card, Btn, Badge, EmptyState } from '@kirocrew/app-sdk/ui';
 import lucideIcons from 'lucide-react';
 import { CodePill, ErrorBlock, LoadingBlock } from './shared';
 import { formatRelativeTime, formatDateTime } from '../lib/time';
-import { API_BASE } from '../lib/api';
+import { apiFetchJson } from '../lib/api';
 
 const { CheckCircle, XCircle, AlertTriangle, Clock, ChevronDown, ChevronRight, History } = lucideIcons;
 
@@ -33,17 +33,21 @@ interface SyncRunDetails extends SyncRun {
 }
 
 function RunChanges({ runId }: { runId: number }) {
-  const { data, isLoading, isError, refetch } = useQuery<SyncRunDetails>({
+  const { data, isLoading, isError, error, refetch } = useQuery<SyncRunDetails>({
     queryKey: ['sync-history-detail', runId],
-    queryFn: async () => {
-      const response = await fetch(`${API_BASE}/history/${runId}`);
-      if (!response.ok) throw new Error('Failed to fetch run details');
-      return response.json();
-    },
+    queryFn: () => apiFetchJson(`/history/${runId}`),
   });
 
   if (isLoading) return <LoadingBlock label="Loading changes…" />;
-  if (isError) return <ErrorBlock label="Failed to load changes for this run" onRetry={() => refetch()} />;
+  if (isError) {
+    return (
+      <ErrorBlock
+        label="Failed to load changes for this run"
+        detail={error?.message}
+        onRetry={() => refetch()}
+      />
+    );
+  }
 
   const changes = data?.changes || [];
   if (changes.length === 0) {
@@ -132,13 +136,9 @@ function HistoryRunCard({ run }: { run: SyncRun }) {
 }
 
 export function HistoryTimeline() {
-  const { data, isLoading, isError, refetch } = useQuery<{ runs: SyncRun[]; total: number }>({
+  const { data, isLoading, isError, error, refetch } = useQuery<{ runs: SyncRun[]; total: number }>({
     queryKey: ['sync-history'],
-    queryFn: async () => {
-      const response = await fetch(`${API_BASE}/history?limit=50`);
-      if (!response.ok) throw new Error('Failed to fetch history');
-      return response.json();
-    },
+    queryFn: () => apiFetchJson('/history?limit=50'),
   });
 
   if (isLoading) {
@@ -152,7 +152,7 @@ export function HistoryTimeline() {
   if (isError) {
     return (
       <Card>
-        <ErrorBlock label="Failed to load sync history" onRetry={() => refetch()} />
+        <ErrorBlock label="Failed to load sync history" detail={error?.message} onRetry={() => refetch()} />
       </Card>
     );
   }

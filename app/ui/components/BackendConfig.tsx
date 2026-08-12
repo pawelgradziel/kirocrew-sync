@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Card, CardTitle, Btn, Badge, Input, EmptyState } from '@kirocrew/app-sdk/ui';
 import lucideIcons from 'lucide-react';
 import { CodePill, ErrorBlock, LoadingBlock, Message } from './shared';
-import { API_BASE } from '../lib/api';
+import { apiFetchJson } from '../lib/api';
 
 const { CheckCircle, AlertTriangle, Loader2, ChevronDown, ChevronRight, Server } = lucideIcons;
 
@@ -48,19 +48,7 @@ interface BackendConfigStatus {
 }
 
 async function fetchBackendConfig(backend: BackendName): Promise<BackendConfigStatus> {
-  const response = await fetch(`${API_BASE}/backends/${backend}/config`);
-  if (!response.ok) throw new Error('Failed to fetch backend configuration');
-  return response.json();
-}
-
-async function readErrorDetail(response: Response, fallback: string): Promise<string> {
-  try {
-    const body = await response.json();
-    if (body && typeof body.detail === 'string') return body.detail;
-  } catch {
-    // response wasn't JSON - fall through to the generic message
-  }
-  return fallback;
+  return apiFetchJson(`/backends/${backend}/config`);
 }
 
 function sourceLabel(field: BackendConfigField): string {
@@ -86,7 +74,7 @@ function BackendConfigForm({ backend }: { backend: BackendName }) {
     null
   );
 
-  const { data, isLoading, isError, refetch } = useQuery<BackendConfigStatus>({
+  const { data, isLoading, isError, error, refetch } = useQuery<BackendConfigStatus>({
     queryKey: ['backend-config', backend],
     queryFn: () => fetchBackendConfig(backend),
   });
@@ -102,17 +90,12 @@ function BackendConfigForm({ backend }: { backend: BackendName }) {
   }, [data]);
 
   const saveConfig = useMutation<BackendConfigStatus, Error, Record<string, string>>({
-    mutationFn: async (config) => {
-      const response = await fetch(`${API_BASE}/backends/${backend}/config`, {
+    mutationFn: (config) =>
+      apiFetchJson(`/backends/${backend}/config`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ config }),
-      });
-      if (!response.ok) {
-        throw new Error(await readErrorDetail(response, 'Failed to save configuration'));
-      }
-      return response.json();
-    },
+      }),
     onSuccess: (result) => {
       setSaveMessage({ type: 'success', text: 'Configuration saved' });
       queryClient.setQueryData(['backend-config', backend], result);
@@ -124,7 +107,11 @@ function BackendConfigForm({ backend }: { backend: BackendName }) {
   });
 
   if (isLoading) return <LoadingBlock label="Loading configuration…" />;
-  if (isError || !data) return <ErrorBlock label="Failed to load configuration" onRetry={() => refetch()} />;
+  if (isError || !data) {
+    return (
+      <ErrorBlock label="Failed to load configuration" detail={error?.message} onRetry={() => refetch()} />
+    );
+  }
 
   const dirtyEntries = Object.entries(values).filter(
     ([key, value]) => value !== (initialValues[key] ?? '')
@@ -181,27 +168,21 @@ function BackendConfigForm({ backend }: { backend: BackendName }) {
 export function BackendConfig() {
   const queryClient = useQueryClient();
   const [testResults, setTestResults] = useState<Record<string, BackendTestResult>>({});
+  const [switchErrors, setSwitchErrors] = useState<Record<string, string>>({});
   const [expanded, setExpanded] = useState<Set<BackendName>>(new Set());
 
-  const { data, isLoading, isError, refetch } = useQuery<BackendsResponse>({
+  const { data, isLoading, isError, error, refetch } = useQuery<BackendsResponse>({
     queryKey: ['backends'],
-    queryFn: async () => {
-      const response = await fetch(`${API_BASE}/backends`);
-      if (!response.ok) throw new Error('Failed to fetch backends');
-      return response.json();
-    },
+    queryFn: () => apiFetchJson('/backends'),
   });
 
   const testBackend = useMutation<BackendTestResult, Error, BackendName>({
-    mutationFn: async (backend) => {
-      const response = await fetch(`${API_BASE}/backends/test`, {
+    mutationFn: (backend) =>
+      apiFetchJson('/backends/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ backend }),
-      });
-      if (!response.ok) throw new Error('Failed to test backend');
-      return response.json();
-    },
+      }),
     onSuccess: (result, backend) => {
       setTestResults((prev) => ({ ...prev, [backend]: result }));
     },
@@ -214,18 +195,22 @@ export function BackendConfig() {
   });
 
   const switchBackend = useMutation<BackendSwitchResult, Error, BackendName>({
-    mutationFn: async (backend) => {
-      const response = await fetch(`${API_BASE}/backends/switch`, {
+    mutationFn: (backend) =>
+      apiFetchJson('/backends/switch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ backend, config: {} }),
+      }),
+    onSuccess: (_result, backend) => {
+      setSwitchErrors((prev) => {
+        const { [backend]: _dropped, ...rest } = prev;
+        return rest;
       });
-      if (!response.ok) throw new Error('Failed to switch backend');
-      return response.json();
-    },
-    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['backends'] });
       queryClient.invalidateQueries({ queryKey: ['sync-status'] });
+    },
+    onError: (err, backend) => {
+      setSwitchErrors((prev) => ({ ...prev, [backend]: err.message }));
     },
   });
 
@@ -252,7 +237,7 @@ export function BackendConfig() {
   if (isError) {
     return (
       <Card>
-        <ErrorBlock label="Failed to load backends" onRetry={() => refetch()} />
+        <ErrorBlock label="Failed to load backends" detail={error?.message} onRetry={() => refetch()} />
       </Card>
     );
   }
@@ -276,6 +261,7 @@ export function BackendConfig() {
           const isTesting = testBackend.isPending && testBackend.variables === backend.name;
           const isSwitching = switchBackend.isPending && switchBackend.variables === backend.name;
           const result = testResults[backend.name];
+          const switchError = switchErrors[backend.name];
           const isExpanded = expanded.has(backend.name);
 
           return (
@@ -310,6 +296,8 @@ export function BackendConfig() {
                 )}
 
                 {result && <Message tone={result.success ? 'success' : 'error'}>{result.message}</Message>}
+
+                {switchError && <Message tone="error">{switchError}</Message>}
 
                 {!backend.configured && !result && (
                   <p className="text-xs text-muted flex items-center gap-1">

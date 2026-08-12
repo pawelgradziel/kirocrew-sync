@@ -9,9 +9,10 @@ import time
 from pathlib import Path
 from typing import Optional, Tuple
 
-from fastapi import APIRouter, FastAPI, HTTPException, Query
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from starlette.concurrency import run_in_threadpool
 
+from .logging_setup import configure_logging
 from .models import (
     SyncStatusResponse, HistoryResponse, ConflictsResponse,
     QuarantineResponse, BackendsResponse, SyncTriggerResponse,
@@ -24,6 +25,12 @@ from .history import HistoryManager
 from .conflicts import ConflictManager
 from .quarantine import QuarantineManager
 from .backends import BackendManager
+
+# Configured before anything else below so that every log call that happens
+# as a side effect of constructing the managers just below (Database.initialize()
+# logs "Database initialized at %s", etc.) is already captured to both
+# stderr and the rotating backend.log file, not just whatever ran after.
+configure_logging()
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +61,63 @@ def _resolve_db_path() -> Optional[Path]:
 
 
 app = FastAPI(title="KiroCrew Sync API")
+
+
+# ---------------------------------------------------------------------------
+# Request logging middleware
+# ---------------------------------------------------------------------------
+#
+# The whole point: right now a failed dashboard fetch just says "Failed to
+# load status" with nothing server-side to correlate it against -- no way to
+# tell whether the request even arrived. This logs exactly one line per
+# request (method, path, query string, response status, duration in ms), so
+# that question always has an answer in backend.log even if nobody was
+# watching stderr live.
+#
+# 2xx/3xx log at INFO, 4xx at WARNING, 5xx at ERROR -- so a `grep -i error`
+# or `grep -i warning` over backend.log surfaces exactly the requests worth
+# looking at.
+#
+# Every route handler in this module already wraps its body in
+# `except Exception -> _internal_error()`, which logs the real exception
+# (via logger.exception, full traceback included) before converting it to a
+# generic HTTPException(500, "Internal server error") -- so the *server log*
+# carries the real detail while the *client response* never does, which is
+# deliberate (see _internal_error's docstring). This middleware's own
+# try/except below exists for the rarer case of an exception that escapes
+# *without* going through that pattern (e.g. a bug in a future route, or a
+# failure in ASGI plumbing itself) -- Starlette's ServerErrorMiddleware
+# (which wraps every user middleware, including this one) still turns that
+# into a generic 500 for the client either way, but without this it would
+# reach the client without ever being logged at all.
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.perf_counter()
+    query = f"?{request.url.query}" if request.url.query else ""
+    request_line = f"{request.method} {request.url.path}{query}"
+
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        duration_ms = (time.perf_counter() - start) * 1000
+        logger.error(
+            "%s -> unhandled %s: %s (%.1fms)",
+            request_line, type(exc).__name__, exc, duration_ms,
+            exc_info=True,
+        )
+        raise
+
+    duration_ms = (time.perf_counter() - start) * 1000
+    status = response.status_code
+    log = logger.info
+    if status >= 500:
+        log = logger.error
+    elif status >= 400:
+        log = logger.warning
+    log("%s -> %s (%.1fms)", request_line, status, duration_ms)
+
+    return response
+
 
 # ---------------------------------------------------------------------------
 # /api prefix
@@ -652,3 +716,57 @@ async def control_daemon(control: DaemonControl):
 # definitions), and is deliberately separate from `/health`, which is
 # registered directly on `app` above -- see the comment there.
 app.include_router(router)
+
+
+# ---------------------------------------------------------------------------
+# Startup log block
+# ---------------------------------------------------------------------------
+#
+# One INFO block, logged once at import time (which for a uvicorn-served app
+# is effectively process startup), that alone should answer "is this the
+# build I think it is, and can it see the sync engine" without any further
+# digging: the resolved data dir (where backend.log and history.db live --
+# confirms which KIROCREW_DIR/KIROCREW_SYNC_DB this process actually
+# resolved, which has been a real source of confusion when the gateway's
+# environment differs from a manually-started shell's), the resolved
+# sync-engine directory and whether kirocrew-sync.sh was actually found
+# there, and the full list of routes this process registered (confirms
+# "byte-identical build" suspicions one way or the other -- a stale process
+# serving an older server.py would be missing routes a newer repo checkout
+# has, or vice versa).
+def _log_startup_info() -> None:
+    from fastapi.routing import APIRoute
+
+    data_dir = sync_mgr.db.db_path.parent
+    # FastAPI's app.include_router(router) does NOT flatten the included
+    # router's individual APIRoute objects into app.routes -- it wraps them
+    # in a single opaque `_IncludedRouter` entry instead (verified against
+    # the installed fastapi version; app.routes directly exposes only
+    # /health, /docs, /openapi.json, etc.). The `/api/*` routes are still
+    # exactly `router.routes` though (already carrying the "/api" prefix,
+    # since `router` was constructed with `prefix="/api"`), so read the
+    # actual per-route list from there instead of trying to walk the
+    # opaque wrapper.
+    all_routes = [r for r in app.routes if isinstance(r, APIRoute)] + [
+        r for r in router.routes if isinstance(r, APIRoute)
+    ]
+    api_routes = sorted(
+        (r.path, ",".join(sorted(m for m in r.methods if m not in ("HEAD", "OPTIONS"))))
+        for r in all_routes
+    )
+
+    logger.info("=" * 70)
+    logger.info("KiroCrew Sync backend starting up")
+    logger.info("  data dir:          %s", data_dir)
+    logger.info("  sync-engine dir:   %s", sync_mgr.sync_dir)
+    logger.info(
+        "  sync engine found: %s (script: %s)", sync_mgr.available, sync_mgr.script
+    )
+    logger.info("  log level:         %s", logging.getLevelName(logger.getEffectiveLevel()))
+    logger.info("  registered routes (%d):", len(api_routes))
+    for path, methods in api_routes:
+        logger.info("    %-7s %s", methods, path)
+    logger.info("=" * 70)
+
+
+_log_startup_info()

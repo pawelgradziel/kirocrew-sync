@@ -3,7 +3,7 @@ import { useQuery, useMutation } from '@tanstack/react-query';
 import { Card, CardTitle, Btn, Toggle } from '@kirocrew/app-sdk/ui';
 import lucideIcons from 'lucide-react';
 import { ErrorBlock, Message } from './shared';
-import { API_BASE } from '../lib/api';
+import { apiFetchJson } from '../lib/api';
 
 const { RotateCw, Loader2 } = lucideIcons;
 
@@ -22,13 +22,11 @@ interface DaemonControlResult {
 type ControlAction = 'start' | 'stop' | 'restart';
 
 async function controlDaemon(action: ControlAction): Promise<DaemonControlResult> {
-  const response = await fetch(`${API_BASE}/daemon/control`, {
+  return apiFetchJson('/daemon/control', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action }),
   });
-  if (!response.ok) throw new Error(`Failed to ${action} daemon`);
-  return response.json();
 }
 
 export function DaemonControl() {
@@ -39,13 +37,9 @@ export function DaemonControl() {
   // isn't fought by the server round-trip - only persisted on commit.
   const [intervalValue, setIntervalValue] = useState<number | null>(null);
 
-  const { data, isLoading, isError, refetch } = useQuery<DaemonConfig>({
+  const { data, isLoading, isError, error, refetch } = useQuery<DaemonConfig>({
     queryKey: ['daemon-config'],
-    queryFn: async () => {
-      const response = await fetch(`${API_BASE}/daemon/config`);
-      if (!response.ok) throw new Error('Failed to fetch config');
-      return response.json();
-    },
+    queryFn: () => apiFetchJson('/daemon/config'),
   });
 
   useEffect(() => {
@@ -53,15 +47,12 @@ export function DaemonControl() {
   }, [data?.interval]);
 
   const updateConfig = useMutation({
-    mutationFn: async (config: Partial<DaemonConfig>) => {
-      const response = await fetch(`${API_BASE}/daemon/config`, {
+    mutationFn: (config: Partial<DaemonConfig>) =>
+      apiFetchJson('/daemon/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...data, ...config }),
-      });
-      if (!response.ok) throw new Error('Failed to update config');
-      return response.json();
-    },
+      }),
     onSuccess: () => {
       refetch();
     },
@@ -122,7 +113,7 @@ export function DaemonControl() {
     return (
       <Card>
         <CardTitle>Daemon Control</CardTitle>
-        <ErrorBlock label="Failed to load daemon status" onRetry={() => refetch()} />
+        <ErrorBlock label="Failed to load daemon status" detail={error?.message} onRetry={() => refetch()} />
       </Card>
     );
   }

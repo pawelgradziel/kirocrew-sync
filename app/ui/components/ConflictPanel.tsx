@@ -2,8 +2,8 @@ import { Fragment, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Card, CardTitle, Btn, Badge, EmptyState } from '@kirocrew/app-sdk/ui';
 import lucideIcons from 'lucide-react';
-import { CodePill, ErrorBlock, LoadingBlock } from './shared';
-import { API_BASE } from '../lib/api';
+import { CodePill, ErrorBlock, LoadingBlock, Message } from './shared';
+import { apiFetchJson } from '../lib/api';
 
 const { ChevronDown, ChevronRight, GitCompare } = lucideIcons;
 
@@ -30,30 +30,26 @@ function DiffValue({ value, emptyLabel }: { value: string | null; emptyLabel: st
 export function ConflictPanel() {
   const queryClient = useQueryClient();
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
+  const [resolveError, setResolveError] = useState<string | null>(null);
 
-  const { data, isLoading, isError, refetch } = useQuery<{ conflicts: Conflict[]; total: number }>({
+  const { data, isLoading, isError, error, refetch } = useQuery<{ conflicts: Conflict[]; total: number }>({
     queryKey: ['conflicts'],
-    queryFn: async () => {
-      const response = await fetch(`${API_BASE}/conflicts`);
-      if (!response.ok) throw new Error('Failed to fetch conflicts');
-      return response.json();
-    },
+    queryFn: () => apiFetchJson('/conflicts'),
   });
 
   const resolveConflict = useMutation({
-    mutationFn: async ({ id, resolution }: { id: number; resolution: string }) => {
-      const response = await fetch(`${API_BASE}/conflicts/${id}/resolve`, {
+    mutationFn: ({ id, resolution }: { id: number; resolution: string }) =>
+      apiFetchJson(`/conflicts/${id}/resolve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ resolution }),
-      });
-      if (!response.ok) throw new Error('Failed to resolve conflict');
-      return response.json();
-    },
+      }),
     onSuccess: () => {
+      setResolveError(null);
       refetch();
       queryClient.invalidateQueries({ queryKey: ['sync-status'] });
     },
+    onError: (err: Error) => setResolveError(err.message),
   });
 
   const toggleExpanded = (id: number) => {
@@ -79,7 +75,7 @@ export function ConflictPanel() {
   if (isError) {
     return (
       <Card>
-        <ErrorBlock label="Failed to load conflicts" onRetry={() => refetch()} />
+        <ErrorBlock label="Failed to load conflicts" detail={error?.message} onRetry={() => refetch()} />
       </Card>
     );
   }
@@ -100,6 +96,12 @@ export function ConflictPanel() {
         <CardTitle className="mb-0">Unresolved Conflicts</CardTitle>
         <Badge variant="err">{conflicts.length}</Badge>
       </div>
+
+      {resolveError && (
+        <div className="mb-4">
+          <Message tone="error">{resolveError}</Message>
+        </div>
+      )}
 
       <div className="overflow-x-auto">
         <table className="w-full text-sm">

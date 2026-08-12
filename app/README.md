@@ -200,6 +200,43 @@ through the reverse proxy, using `app.json`'s `backend.healthCheck` (default
 `/health`). Moving it under `/api/` without also changing `healthCheck`
 would make every poll 404 and the app would never be marked healthy.
 
+## Logging
+
+The backend logs to two places at once:
+
+- **stderr** — captured by the KiroCrew gateway from the backend process it
+  spawns; this is what shows up in the gateway's own process logs.
+- **`<data dir>/backend.log`** — a rotating file (2MB × 3 backups, so it can
+  never grow without bound) at the same data directory `history.db` lives in
+  (`~/.kiro/crew/apps/kirocrew-sync/data/backend.log` by default, or
+  wherever `KIROCREW_DIR`/`KIROCREW_SYNC_DB` resolve it to — see
+  `backend/logging_setup.py`). If that file can't be created (read-only
+  data dir, missing parent, disk full), the backend falls back to
+  stderr-only and keeps serving requests rather than failing to start.
+
+What gets logged:
+
+- **One line per HTTP request** — method, path, query string, response
+  status, and duration in milliseconds. 2xx/3xx log at INFO, 4xx at
+  WARNING, 5xx at ERROR, so `grep -i error backend.log` or `grep -i warning
+  backend.log` surfaces exactly the requests worth looking at. This answers
+  "did this request even arrive?" — previously the backend logged nothing
+  at all about requests it received.
+- **The real detail behind every 500** — route handlers convert internal
+  failures into a generic `HTTPException(500, "Internal server error")` so
+  the client response never leaks filesystem paths or sqlite internals, but
+  the *log* always carries the real exception type, message, and traceback.
+- **A startup block**, logged once when the process starts: the resolved
+  data dir, the resolved sync-engine directory and whether
+  `kirocrew-sync.sh` was actually found there, the effective log level, and
+  the full list of registered routes. This alone should answer "is this the
+  build I think it is, and can it see the sync engine" without any further
+  digging.
+
+**Log level** is configurable via the `KIROCREW_SYNC_LOG_LEVEL` environment
+variable (`DEBUG`, `INFO`, `WARNING`, `ERROR`, ...; default `INFO`). An
+unrecognized value falls back to `INFO` rather than preventing startup.
+
 ## Architecture
 
 ```
@@ -218,7 +255,8 @@ would make every poll 404 and the app would never be marked healthy.
 │   ├── quarantine.py            # Quarantine persistence
 │   ├── backends.py              # Backend config/testing
 │   ├── artifacts.py             # Parses conflicts/quarantine logs written by the bash sync engine
-│   └── notifications.py         # Delivers notifications to the KiroCrew gateway
+│   ├── notifications.py         # Delivers notifications to the KiroCrew gateway
+│   └── logging_setup.py         # Configures stderr + rotating backend.log — see Logging below
 ├── ui/
 │   ├── assets/
 │   │   └── icon.svg             # App icon (stroke-based sync mark, matches the RefreshCw lucide icon declared in app.json)
@@ -237,7 +275,8 @@ would make every poll 404 and the app would never be marked healthy.
 │       ├── BackendConfig.tsx
 │       └── shared.tsx            # Small pieces shared across the panels above (inline message banner, loading/error/code-pill helpers)
 └── data/
-    └── history.db                # Sync history database
+    ├── history.db                # Sync history database
+    └── backend.log                # Rotating backend request/error log — see Logging below
 ```
 
 `ui/package.json`, `ui/esbuild.config.mjs`, `ui/tsconfig.json` and `ui/types/` are build-time only (dev dependencies, editor types) — none of them are needed on the machine the app runs on, and `ui/node_modules/` is gitignored and never copied by `install-app.sh`.
@@ -297,6 +336,17 @@ python3 ~/.kiro/crew/apps/kirocrew-sync/backend/database.py reset
 - Restart KiroCrew gateway
 - Check `~/.kiro/crew/apps/kirocrew-sync/app.json` exists
 - Check logs: `~/.kiro/crew/gateway.log`
+
+### A dashboard panel says "Failed to load ..."
+
+The error state now shows the real reason under the heading (HTTP status +
+server message, or a distinct network-error label if the request never got
+a response at all — see the shared fetch helper in `ui/lib/api.ts`) and the
+exact URL that was requested. Cross-reference that against
+`~/.kiro/crew/apps/kirocrew-sync/data/backend.log` (see Logging above) to
+see the matching server-side request line — if there is no matching line at
+all, the request never reached this backend (stale bundle, proxy
+misconfiguration, wrong port), which is itself the useful signal.
 
 ### Sync fails with "script not found"
 

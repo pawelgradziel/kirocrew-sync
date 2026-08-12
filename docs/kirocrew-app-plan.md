@@ -66,8 +66,7 @@ cd ~/.kiro/crew/apps/kirocrew-sync
     {
       "name": "sync-daemon",
       "every": 300,
-      "message": "Run sync via backend/sync_manager.py, store results in data/history.db, send notifications on conflicts/quarantine/failure. Skip if no changes detected (silent by design).",
-      "persistent_session": false,
+      "command": "\"$HOME/.kiro/crew/workspace/kirocrew-sync/kirocrew-sync.sh\" sync --strategy auto",
       "silent": true,
       "enabled": true
     }
@@ -112,6 +111,16 @@ cd ~/.kiro/crew/apps/kirocrew-sync
   }
 }
 ```
+
+**Note (post-implementation correction):** the cron above was originally
+shipped with `"message": "Run sync via backend/sync_manager.py, ..."` — an
+agent-dispatched cron that spun up a fresh LLM session every 5 minutes,
+burning tokens and re-asking for tool approvals on every tick. It now uses
+`command` to run `kirocrew-sync.sh` directly, with no LLM involved. See
+"Background Crons (App-Managed)" in `docs/kirocrew-app-summary.md` for the
+full rationale and the known trade-off (cron-triggered runs sync data but
+don't populate the dashboard's history/conflicts/quarantine/notifications
+until a backend-owned, HTTP-free entry point exists to record them).
 
 ### 1.3 Backend Structure
 

@@ -2,9 +2,9 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Card, CardTitle, Btn, Badge } from '@kirocrew/app-sdk/ui';
 import lucideIcons from 'lucide-react';
-import { Message } from './shared';
+import { ErrorBlock, Message } from './shared';
 import { formatRelativeTime } from '../lib/time';
-import { API_BASE } from '../lib/api';
+import { apiFetchJson } from '../lib/api';
 
 const { RefreshCw, CheckCircle, AlertTriangle, XCircle, ShieldAlert, Loader2 } = lucideIcons;
 
@@ -53,24 +53,14 @@ export function StatusWidget() {
     null
   );
 
-  const { data, isLoading, refetch } = useQuery<{ status: SyncStatus }>({
+  const { data, isLoading, error, refetch } = useQuery<{ status: SyncStatus }>({
     queryKey: ['sync-status'],
-    queryFn: async () => {
-      const response = await fetch(`${API_BASE}/status`);
-      if (!response.ok) throw new Error('Failed to fetch status');
-      return response.json();
-    },
+    queryFn: () => apiFetchJson('/status'),
     refetchInterval: 10000, // Refresh every 10 seconds
   });
 
   const triggerSync = useMutation<SyncTriggerResult, Error, void>({
-    mutationFn: async () => {
-      const response = await fetch(`${API_BASE}/sync`, {
-        method: 'POST',
-      });
-      if (!response.ok) throw new Error('Failed to trigger sync');
-      return response.json();
-    },
+    mutationFn: () => apiFetchJson('/sync', { method: 'POST' }),
     onSuccess: (result) => {
       if (!result.started) {
         setSyncMessage({ type: 'error', text: result.message || 'Sync already in progress' });
@@ -153,7 +143,7 @@ export function StatusWidget() {
           {syncMessage && <Message tone={syncMessage.type}>{syncMessage.text}</Message>}
         </div>
       ) : (
-        <p className="text-sm text-muted">Failed to load status</p>
+        <ErrorBlock label="Failed to load status" detail={error?.message} onRetry={() => refetch()} />
       )}
 
       <Btn

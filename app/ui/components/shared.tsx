@@ -36,11 +36,28 @@ export function LoadingBlock({ label }: { label: string }) {
  * Failed-to-load placeholder with a retry action. Kept visually and
  * semantically distinct from "loaded successfully, nothing here" empty
  * states — a fetch failure must never read as "there is nothing to see".
+ *
+ * `detail` is the real reason, straight from apiFetch()'s Error message
+ * (status code + server response body + request URL, or a distinct
+ * network-error label — see lib/api.ts) — shown under the generic heading
+ * so a failure is actually diagnosable from the screen instead of just
+ * "Failed to load X".
  */
-export function ErrorBlock({ label, onRetry }: { label: string; onRetry: () => void }) {
+export function ErrorBlock({
+  label,
+  detail,
+  onRetry,
+}: {
+  label: string;
+  detail?: string;
+  onRetry: () => void;
+}) {
   return (
     <div className="py-8 text-center space-y-3">
       <p className="text-sm text-muted">{label}</p>
+      {detail && (
+        <p className="text-xs text-danger font-mono break-words px-4">{detail}</p>
+      )}
       <Btn onClick={onRetry}>Retry</Btn>
     </div>
   );

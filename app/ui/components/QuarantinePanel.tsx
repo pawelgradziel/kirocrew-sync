@@ -1,9 +1,10 @@
+import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Card, CardTitle, Btn, Badge, EmptyState } from '@kirocrew/app-sdk/ui';
 import lucideIcons from 'lucide-react';
-import { ErrorBlock, LoadingBlock } from './shared';
+import { ErrorBlock, LoadingBlock, Message } from './shared';
 import { formatRelativeTime } from '../lib/time';
-import { API_BASE } from '../lib/api';
+import { apiFetchJson } from '../lib/api';
 
 const { ShieldAlert, ShieldCheck } = lucideIcons;
 
@@ -27,28 +28,22 @@ const REASON_LABELS: Record<string, string> = {
 
 export function QuarantinePanel() {
   const queryClient = useQueryClient();
-  const { data, isLoading, isError, refetch } = useQuery<{ machines: QuarantinedMachine[]; total: number }>({
+  const [dismissError, setDismissError] = useState<string | null>(null);
+
+  const { data, isLoading, isError, error, refetch } = useQuery<{ machines: QuarantinedMachine[]; total: number }>({
     queryKey: ['quarantine'],
-    queryFn: async () => {
-      const response = await fetch(`${API_BASE}/quarantine`);
-      if (!response.ok) throw new Error('Failed to fetch quarantine');
-      return response.json();
-    },
+    queryFn: () => apiFetchJson('/quarantine'),
   });
 
   const dismissQuarantine = useMutation({
-    mutationFn: async (machine: string) => {
-      const response = await fetch(
-        `${API_BASE}/quarantine/${encodeURIComponent(machine)}/clear`,
-        { method: 'POST' }
-      );
-      if (!response.ok) throw new Error('Failed to dismiss quarantine record');
-      return response.json();
-    },
+    mutationFn: (machine: string) =>
+      apiFetchJson(`/quarantine/${encodeURIComponent(machine)}/clear`, { method: 'POST' }),
     onSuccess: () => {
+      setDismissError(null);
       refetch();
       queryClient.invalidateQueries({ queryKey: ['sync-status'] });
     },
+    onError: (err: Error) => setDismissError(err.message),
   });
 
   if (isLoading) {
@@ -62,7 +57,11 @@ export function QuarantinePanel() {
   if (isError) {
     return (
       <Card>
-        <ErrorBlock label="Failed to load quarantined machines" onRetry={() => refetch()} />
+        <ErrorBlock
+          label="Failed to load quarantined machines"
+          detail={error?.message}
+          onRetry={() => refetch()}
+        />
       </Card>
     );
   }
@@ -83,6 +82,12 @@ export function QuarantinePanel() {
         <CardTitle className="mb-0">Quarantined Machines</CardTitle>
         <Badge variant="err">{machines.length}</Badge>
       </div>
+
+      {dismissError && (
+        <div className="mb-4">
+          <Message tone="error">{dismissError}</Message>
+        </div>
+      )}
 
       <div className="space-y-4">
         {machines.map((machine) => (

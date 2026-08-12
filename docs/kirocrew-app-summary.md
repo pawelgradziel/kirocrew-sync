@@ -141,16 +141,54 @@ Defined in `app.json`, visible in dashboard Jobs list:
 {
   "crons": [
     {
-      "name": "kirocrew-sync-daemon",
+      "name": "sync-daemon",
       "every": 300,
-      "message": "Run sync via Python backend, store results in history.db, send notifications on conflicts/quarantine/failure",
-      "persistent_session": false,
+      "command": "\"$HOME/.kiro/crew/workspace/kirocrew-sync/kirocrew-sync.sh\" sync --strategy auto",
       "silent": true,
       "enabled": true
     }
   ]
 }
 ```
+
+**Not a `message` (agent) cron.** An earlier draft used `message` to describe the
+sync in prose and let an LLM carry it out. In practice that spins up a fresh ACP
+agent session every 5 minutes: it burns tokens and fails outright whenever the
+selected model is temporarily unavailable, and every tick re-asks for tool
+approvals a prior tick's approval doesn't carry over to (no session memory
+between ticks), which was the single most annoying thing about running the app.
+`command` bypasses the LLM entirely — the gateway runs `kirocrew-sync.sh sync`
+as a plain sandboxed subprocess on the timer, matching the "zero tokens"
+script-based `contrib/kirocrew-cron/sync_daemon.py` integration this app was
+meant to replace, not regress from.
+
+Two things this move gives up, both worth knowing before relying on it:
+
+- **`command`/`script` cron entries cannot authenticate to this app's own
+  `/api/sync` route.** The `command` field is vetted at authoring time
+  (`kiro_crew.mcp_cron._vet_shell_command`) and categorically refuses command
+  substitution (`` $(...) ``, backticks), so a cron command cannot mint the
+  gateway token or read `~/.kiro/crew/.local_secret` the way `install-app.sh`
+  does — that vetting exists specifically to stop a cron from exfiltrating
+  credentials, and is not something to route around. `script` crons run
+  unrestricted Python, but the file must live under
+  `~/.kiro/crew/crons/` — outside this app's own package — with no manifest
+  mechanism to place one there. So the cron now calls `kirocrew-sync.sh`
+  directly (same script, same `config.sh`, same default `sync_dir` as
+  `SyncManager` already uses — see `app/backend/sync_manager.py`) instead of
+  going through the backend's HTTP API.
+- **Consequently, cron-triggered runs do not populate the dashboard.** The
+  History Timeline, Conflicts/Quarantine panels, and the notification
+  channels below are all populated by `server.py`'s `POST /api/sync` handler
+  (`history_mgr.record_sync`, artifact ingestion, `_send_sync_notifications`)
+  — not by anything `kirocrew-sync.sh` writes on its own. A background tick
+  syncs the data for real (three-way merge, conflict resolution, quarantine
+  handling all still happen), but the dashboard only reflects it after the
+  user hits "Sync Now" (which does go through `/api/sync`). Closing this gap
+  needs a small backend-owned entry point that runs
+  `SyncManager.run_sync()` + `HistoryManager.record_sync()` + the
+  notification calls in-process, with no HTTP hop and therefore no auth
+  problem — out of scope for this change (see `app/backend/**`).
 
 User can pause/resume from:
 - Jobs list in dashboard

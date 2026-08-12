@@ -35,6 +35,7 @@ applies on top of this.
 
 import asyncio
 import importlib
+import logging
 import subprocess
 import time
 from pathlib import Path
@@ -541,3 +542,112 @@ def test_sync_already_running_short_circuits(app_env, client, monkeypatch):
     assert body["started"] is False
     assert body["success"] is False
     assert body["message"] == "Sync already in progress"
+
+
+# ---------------------------------------------------------------------------
+# Request logging middleware (app/backend/logging_setup.py + log_requests in
+# server.py) -- before this, the backend logged nothing at all about a
+# request it received, so there was no way to tell from the log alone
+# whether a request even arrived, let alone what it did.
+# ---------------------------------------------------------------------------
+
+def _request_log_records(caplog):
+    return [r for r in caplog.records if r.name == "backend.server"]
+
+
+def test_request_logging_logs_method_path_status_and_duration(app_env, client, caplog):
+    """A successful request must produce a log line carrying enough to
+    answer "did this request arrive, and what happened" on its own: method,
+    path, query string, response status, and how long it took."""
+    with caplog.at_level(logging.INFO, logger="backend.server"):
+        resp = client.get("/api/history?limit=5")
+    assert resp.status_code == 200
+
+    matches = [r for r in _request_log_records(caplog) if "GET /api/history?limit=5 ->" in r.message]
+    assert matches, f"no request-logging line found; records were: {[r.message for r in caplog.records]}"
+    record = matches[-1]
+    assert record.levelno == logging.INFO
+    assert "-> 200" in record.message
+    assert "ms)" in record.message
+
+
+def test_request_logging_logs_4xx_at_warning(app_env, client, caplog):
+    """Client errors (4xx) are logged at WARNING, not buried at INFO where
+    they'd be indistinguishable from routine traffic when grepping a live
+    backend.log for trouble."""
+    with caplog.at_level(logging.INFO, logger="backend.server"):
+        resp = client.get("/api/history/999999")
+    assert resp.status_code == 404
+
+    matches = [r for r in _request_log_records(caplog) if "GET /api/history/999999 ->" in r.message]
+    assert matches, f"no request-logging line found; records were: {[r.message for r in caplog.records]}"
+    assert matches[-1].levelno == logging.WARNING
+    assert "-> 404" in matches[-1].message
+
+
+def test_request_logging_logs_real_exception_detail_while_client_still_gets_generic_message(
+    app_env, client, monkeypatch, caplog
+):
+    """The client-visible response must stay generic (see
+    test_internal_error_returns_generic_message above) -- but the SERVER
+    log must carry the real exception's type and message. That's the whole
+    point of this change: today the backend logs nothing about a failing
+    request, so there is no way to tell what actually broke from the log
+    alone, even though the fix (this middleware + _internal_error's existing
+    logger.exception call) never changes what the client sees."""
+    def _boom(*args, **kwargs):
+        raise ValueError(
+            "Invalid isoformat string: 'not-a-timestamp' at /home/pawel/.kiro/crew/data/history.db"
+        )
+
+    monkeypatch.setattr(server_module.history_mgr, "get_recent", _boom)
+
+    with caplog.at_level(logging.INFO, logger="backend.server"):
+        resp = client.get("/api/history")
+
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "Internal server error"
+
+    # caplog.text (not record.message) because the real detail lives in the
+    # traceback logger.exception() attaches via exc_info -- record.message
+    # is just the "%s failed" summary line, the exception itself is
+    # formatted separately by the handler.
+    assert "ValueError" in caplog.text, "real exception type is missing from the server log"
+    assert "not-a-timestamp" in caplog.text, "real exception detail is missing from the server log"
+
+    request_lines = [r for r in _request_log_records(caplog) if "GET /api/history ->" in r.message]
+    assert request_lines, f"no 500 request-logging line found; records were: {[r.message for r in caplog.records]}"
+    assert request_lines[-1].levelno == logging.ERROR
+    assert "-> 500" in request_lines[-1].message
+
+
+def test_request_logging_writes_to_rotating_file_in_data_dir(app_env, client):
+    """backend.log must land under the same data dir the rest of the app
+    resolves (app_env points KIROCREW_SYNC_DB at tmp_path/data/history.db),
+    and must actually contain a line for a request that was just made --
+    this is the file an operator is told to go look at."""
+    resp = client.get("/api/history?limit=5")
+    assert resp.status_code == 200
+
+    log_path = app_env["db_path"].parent / "backend.log"
+    assert log_path.exists(), f"expected a log file at {log_path}"
+    contents = log_path.read_text(encoding="utf-8")
+    assert "GET /api/history?limit=5 -> 200" in contents
+
+
+# ---------------------------------------------------------------------------
+# Startup log block (_log_startup_info in server.py)
+# ---------------------------------------------------------------------------
+
+def test_startup_log_block_reports_data_dir_engine_and_routes(app_env):
+    """One block, logged once at import (app_env's importlib.reload triggers
+    it), that alone should answer "is this the build I think it is, and can
+    it see the sync engine" -- see _log_startup_info's docstring."""
+    log_path = app_env["db_path"].parent / "backend.log"
+    contents = log_path.read_text(encoding="utf-8")
+
+    assert "KiroCrew Sync backend starting up" in contents
+    assert str(app_env["db_path"].parent) in contents
+    assert str(app_env["sync_dir"]) in contents
+    assert "sync engine found: False" in contents  # app_env never writes kirocrew-sync.sh
+    assert "GET     /api/history" in contents or "GET /api/history" in contents

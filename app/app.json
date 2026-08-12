@@ -55,8 +55,7 @@
     {
       "name": "sync-daemon",
       "every": 300,
-      "message": "Run sync via backend/sync_manager.py, store results in data/history.db, send notifications on conflicts/quarantine/failure. Skip if no changes detected (silent by design).",
-      "persistent_session": false,
+      "command": "\"$HOME/.kiro/crew/workspace/kirocrew-sync/kirocrew-sync.sh\" sync --strategy auto",
       "silent": true,
       "enabled": true
     }
