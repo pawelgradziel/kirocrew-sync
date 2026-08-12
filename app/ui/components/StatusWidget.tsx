@@ -43,7 +43,14 @@ const STATE_LABEL: Record<SyncStatus['state'], string> = {
 };
 
 interface SyncTriggerResult {
+  /** The engine was actually launched (false only for the already-running short-circuit). */
   started: boolean;
+  /** Whether the sync itself succeeded. `started` says a run happened, NOT that it worked --
+   *  conflating the two is what previously rendered "Sync completed with exit code 1" in a
+   *  green success banner right next to a red "Failed" status badge. */
+  success?: boolean;
+  /** Engine exit code: 0 ok, 3 completed-with-quarantine (also a success), 1 failed. */
+  exit_code?: number | null;
   message?: string;
 }
 
@@ -68,7 +75,17 @@ export function StatusWidget() {
         return;
       }
 
-      setSyncMessage(result.message ? { type: 'success', text: result.message } : null);
+      // Style on `success`, not `started`. A run that launched and then failed is
+      // still a failure, and older builds reported it in a green banner that
+      // directly contradicted the red status badge beside it. `success` is
+      // optional on the wire, so fall back to the exit-code contract (0 and 3
+      // are both successes) and only then to "it started".
+      const ok =
+        result.success ??
+        (result.exit_code == null ? true : [0, 3].includes(result.exit_code));
+      setSyncMessage(
+        result.message ? { type: ok ? 'success' : 'error', text: result.message } : null
+      );
       refetch();
       queryClient.invalidateQueries({ queryKey: ['sync-history'] });
       queryClient.invalidateQueries({ queryKey: ['conflicts'] });
