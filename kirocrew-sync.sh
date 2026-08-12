@@ -207,8 +207,25 @@ check_kirocrew_running() {
     # Observed exactly that -- one sync merging 400 rows, then two refusals 30s
     # and 44s later. The marker is touched after each successful pack, so
     # anything not newer than it is our own work, not KiroCrew's.
-    local find_args=(-name "*.db" -mmin -1)
+    # Two whole subtrees under $KIROCREW_DIR are OURS, not KiroCrew's, and
+    # counting them made this refuse forever:
+    #   $SYNC_ROOT/**      the sync repo and the pre-pack backups this script
+    #                      writes itself on every run
+    #   $KIROCREW_DIR/apps/**  app-private databases -- including this app's own
+    #                      data/history.db, which records a row for every sync,
+    #                      so merely logging run N guaranteed run N+1 saw a
+    #                      "recent write" and refused. Observed live: five
+    #                      consecutive refusals with nothing but our own two
+    #                      files being counted.
+    # Measured with these excluded, KiroCrew's real databases do fall quiet
+    # within ~20s of activity, which is what makes the heuristic workable.
+    local find_args=(
+        -path "$SYNC_ROOT/*" -prune -o
+        -path "$KIROCREW_DIR/apps/*" -prune -o
+        -name "*.db" -mmin -1
+    )
     [ -f "$PACK_MARKER" ] && find_args+=(-newer "$PACK_MARKER")
+    find_args+=(-print)
 
     local recent_writes
     recent_writes="$(find "$KIROCREW_DIR" "${find_args[@]}" 2>/dev/null | wc -l | tr -d ' ')"

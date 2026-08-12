@@ -98,8 +98,16 @@ should_sync_now() {
     
     # KiroCrew is running - check if databases are being written
     # (heuristic: no writes to .db files in last 60 seconds)
+    # Exclude our own writes, or this never reports idle: $SYNC_ROOT holds the
+    # sync repo and this script's own pre-pack backups, and $KIROCREW_DIR/apps
+    # holds app-private databases -- including the sync app's history.db, which
+    # gains a row on every single run. Mirrors check_kirocrew_running() in
+    # kirocrew-sync.sh; keep the two in step.
     local recent_writes
-    recent_writes=$(find "$KIROCREW_DIR" -name "*.db" -mmin -1 2>/dev/null | wc -l)
+    recent_writes=$(find "$KIROCREW_DIR" \
+        -path "$SYNC_ROOT/*" -prune -o \
+        -path "$KIROCREW_DIR/apps/*" -prune -o \
+        -name "*.db" -mmin -1 -print 2>/dev/null | wc -l)
     
     if [ "$recent_writes" -eq 0 ]; then
         daemon_log "KiroCrew running but idle, syncing..."
