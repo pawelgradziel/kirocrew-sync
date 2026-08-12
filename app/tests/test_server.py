@@ -116,10 +116,12 @@ def client(app_env):
 # ---------------------------------------------------------------------------
 #
 # The gateway polls this endpoint after spawning the backend and only starts
-# proxying /api/apps/kirocrew-sync/* traffic to it once /health responds
+# proxying /apps/kirocrew-sync/api/* traffic to it once /health responds
 # with a non-error status (see kiro_crew.apps.backend._health_check_loop /
 # get_app_backend_port upstream). It must respond even with no sync engine,
-# no history, and a database that hasn't been touched.
+# no history, and a database that hasn't been touched. Unlike every other
+# route in this file, /health is NOT under /api/ -- see the comment above
+# `get_health` in server.py for why.
 
 def test_health_returns_200_ok(app_env, client):
     resp = client.get("/health")
@@ -139,6 +141,51 @@ def test_health_does_not_touch_sync_engine_or_database(app_env, client, monkeypa
 
     resp = client.get("/health")
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Contract: every application route (except /health) lives under /api/
+# ---------------------------------------------------------------------------
+#
+# The gateway's dashboard reverse proxy (handle_app_api_proxy in KiroCrew's
+# src/kiro_crew/apps/routes.py, registered at
+# `/apps/{name}/api/{path:.*}`) forwards a browser request for
+# `/apps/kirocrew-sync/api/<route>` to this backend as
+# `{backend_url}/api/<route>` -- it deliberately RE-ADDS the `/api/` prefix
+# it stripped off the incoming route, so the backend must serve its own
+# routes at `/api/...` to be reachable at all. Curling a bare route (e.g.
+# `/status`) on this process directly succeeds even when the prefix is
+# missing -- that's exactly how this broke silently before: every panel in
+# the dashboard showed "Failed to load ..." even though the backend process
+# was up and `/status` worked fine when hit directly, bypassing the proxy.
+#
+# This test exists so nobody "cleans up" `router = APIRouter(prefix="/api")`
+# in server.py later, sees all the OTHER tests still pass (they call
+# `server_module.app` directly via TestClient, same as this one), and ships
+# that regression again. It asserts against the live route table, not
+# against a hardcoded list, so it can't go stale as routes are added.
+def test_every_app_route_except_health_lives_under_api_prefix(app_env, client):
+    from fastapi.routing import APIRoute
+
+    routes = [r for r in server_module.app.routes if isinstance(r, APIRoute)]
+    assert routes, "expected at least one APIRoute on the app -- route discovery is broken"
+
+    non_api_routes = [r.path for r in routes if r.path != "/health" and not r.path.startswith("/api/")]
+    assert non_api_routes == [], (
+        "found application route(s) NOT under /api/: "
+        f"{non_api_routes} -- the gateway's reverse proxy re-adds /api/ to "
+        "every forwarded request, so any route outside that prefix is "
+        "unreachable through the dashboard (curl-able directly on this "
+        "process, but 404s through the proxy). Only /health is exempt: the "
+        "gateway health-checks it directly against the backend port, never "
+        "through the proxy."
+    )
+
+    # And the inverse: confirm /health specifically is NOT under /api/,
+    # since that's the one deliberate exception the assertion above carves
+    # out -- a typo there would silently widen it to allow anything.
+    health_routes = [r.path for r in routes if r.path == "/health"]
+    assert health_routes == ["/health"], "expected exactly one /health route at the root"
 
 
 # ---------------------------------------------------------------------------
@@ -164,11 +211,11 @@ def test_status_stays_responsive_during_a_slow_sync(app_env):
     async def scenario():
         transport = httpx.ASGITransport(app=server_module.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
-            sync_task = asyncio.create_task(ac.post("/sync", json={"strategy": "auto"}))
+            sync_task = asyncio.create_task(ac.post("/api/sync", json={"strategy": "auto"}))
             await asyncio.sleep(0.4)  # let the sync actually start
 
             start = time.monotonic()
-            status_resp = await ac.get("/status")
+            status_resp = await ac.get("/api/status")
             status_elapsed = time.monotonic() - start
 
             sync_resp = await sync_task
@@ -211,7 +258,7 @@ def test_status_exit_code_3_is_not_reported_as_failed(app_env, client):
         error=None,
     ))
 
-    resp = client.get("/status")
+    resp = client.get("/api/status")
     assert resp.status_code == 200
     state = resp.json()["status"]["state"]
     assert state != "failed"
@@ -240,7 +287,7 @@ def test_status_exit_code_1_is_still_reported_as_failed(app_env, client):
         error="boom",
     ))
 
-    resp = client.get("/status")
+    resp = client.get("/api/status")
     assert resp.status_code == 200
     assert resp.json()["status"]["state"] == "failed"
 
@@ -250,7 +297,7 @@ def test_status_exit_code_1_is_still_reported_as_failed(app_env, client):
 # ---------------------------------------------------------------------------
 
 def test_sync_rejects_unknown_strategy_with_422(app_env, client):
-    resp = client.post("/sync", json={"strategy": "bogus"})
+    resp = client.post("/api/sync", json={"strategy": "bogus"})
     assert resp.status_code == 422
 
 
@@ -274,14 +321,14 @@ def test_sync_skips_ingestion_when_engine_exits_before_truncation(app_env, clien
         # reached cmd_sync's body at all.
     )
 
-    resp = client.post("/sync", json={"strategy": "auto"})
+    resp = client.post("/api/sync", json={"strategy": "auto"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["started"] is True
     assert body["success"] is False
     assert body["exit_code"] == 1
 
-    conflicts = client.get("/conflicts").json()
+    conflicts = client.get("/api/conflicts").json()
     assert conflicts["total"] == 0, (
         "stale conflicts.jsonl from a prior run was re-ingested as a new "
         "conflict even though this run never reached truncation"
@@ -310,13 +357,13 @@ def test_sync_ingests_when_engine_exits_after_truncation(app_env, client):
         exit_code=1,
     )
 
-    resp = client.post("/sync", json={"strategy": "auto"})
+    resp = client.post("/api/sync", json={"strategy": "auto"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["success"] is False
     assert body["exit_code"] == 1
 
-    conflicts = client.get("/conflicts").json()
+    conflicts = client.get("/api/conflicts").json()
     assert conflicts["total"] == 1
     assert conflicts["conflicts"][0]["row_id"] == "row-2"
 
@@ -328,7 +375,7 @@ def test_sync_ingests_when_engine_exits_after_truncation(app_env, client):
 def test_sync_response_reports_success_and_exit_code_on_success(app_env, client):
     _write_fake_script(app_env["sync_dir"], stdout_text="Sync complete", exit_code=0)
 
-    resp = client.post("/sync", json={"strategy": "auto"})
+    resp = client.post("/api/sync", json={"strategy": "auto"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["started"] is True
@@ -342,7 +389,7 @@ def test_sync_response_reports_success_and_exit_code_on_success(app_env, client)
 def test_sync_response_reports_failure_on_exit_1(app_env, client):
     _write_fake_script(app_env["sync_dir"], stderr_text="boom", exit_code=1)
 
-    resp = client.post("/sync", json={"strategy": "auto"})
+    resp = client.post("/api/sync", json={"strategy": "auto"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["started"] is True
@@ -365,17 +412,17 @@ def test_sync_timeout_is_recorded_in_history_before_504(app_env, client, monkeyp
 
     monkeypatch.setattr(server_module.sync_mgr, "run_sync", _raise_timeout)
 
-    resp = client.post("/sync", json={"strategy": "auto"})
+    resp = client.post("/api/sync", json={"strategy": "auto"})
     assert resp.status_code == 504
     assert "recorded as run" in resp.json()["detail"]
 
-    history = client.get("/history").json()
+    history = client.get("/api/history").json()
     assert history["total"] == 1
     run = history["runs"][0]
     assert run["exit_code"] == -1
     assert "timed out" in run["error"]
 
-    details = client.get(f"/history/{run['id']}").json()
+    details = client.get(f"/api/history/{run['id']}").json()
     assert "partial stdout before kill" in details["output"]
     assert "partial stderr before kill" in details["output"]
 
@@ -391,12 +438,12 @@ def test_sync_timeout_is_recorded_in_history_before_504(app_env, client, monkeyp
     {"offset": -5},
 ])
 def test_history_rejects_out_of_range_bounds(app_env, client, params):
-    resp = client.get("/history", params=params)
+    resp = client.get("/api/history", params=params)
     assert resp.status_code == 422
 
 
 def test_history_accepts_in_range_bounds(app_env, client):
-    resp = client.get("/history", params={"limit": 10, "offset": 0})
+    resp = client.get("/api/history", params={"limit": 10, "offset": 0})
     assert resp.status_code == 200
 
 
@@ -410,7 +457,7 @@ def test_internal_error_returns_generic_message(app_env, client, monkeypatch):
 
     monkeypatch.setattr(server_module.history_mgr, "get_recent", _boom)
 
-    resp = client.get("/history")
+    resp = client.get("/api/history")
     assert resp.status_code == 500
     detail = resp.json()["detail"]
     assert detail == "Internal server error"
@@ -423,15 +470,15 @@ def test_deliberate_statuses_are_preserved(app_env, client):
     through with their real, useful detail -- only the generic
     `except Exception` fallback was made generic."""
     # 503: no kirocrew-sync.sh was ever written for this app_env.
-    resp = client.post("/sync", json={"strategy": "auto"})
+    resp = client.post("/api/sync", json={"strategy": "auto"})
     assert resp.status_code == 503
     assert "kirocrew-sync.sh" in resp.json()["detail"]
 
     # 404: no such conflict/run/machine.
-    resp = client.get("/history/999999")
+    resp = client.get("/api/history/999999")
     assert resp.status_code == 404
 
-    resp = client.post("/quarantine/no-such-machine/clear")
+    resp = client.post("/api/quarantine/no-such-machine/clear")
     assert resp.status_code == 404
 
 
@@ -447,7 +494,7 @@ def test_cleanup_old_runs_is_called_after_a_sync(app_env, client, monkeypatch):
     )
     _write_fake_script(app_env["sync_dir"], stdout_text="Sync complete", exit_code=0)
 
-    resp = client.post("/sync", json={"strategy": "auto"})
+    resp = client.post("/api/sync", json={"strategy": "auto"})
     assert resp.status_code == 200
     assert len(calls) >= 1
 
@@ -464,7 +511,7 @@ def test_sync_survives_ingestion_failure(app_env, client, monkeypatch):
 
     monkeypatch.setattr(server_module.sync_mgr, "ingest_artifacts", _boom)
 
-    resp = client.post("/sync", json={"strategy": "auto"})
+    resp = client.post("/api/sync", json={"strategy": "auto"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["success"] is True
@@ -478,7 +525,7 @@ def test_sync_survives_ingestion_failure(app_env, client, monkeypatch):
 def test_sync_without_body_uses_defaults(app_env, client):
     _write_fake_script(app_env["sync_dir"], stdout_text="Sync complete", exit_code=0)
 
-    resp = client.post("/sync")
+    resp = client.post("/api/sync")
     assert resp.status_code == 200
     body = resp.json()
     assert body["started"] is True
@@ -488,7 +535,7 @@ def test_sync_without_body_uses_defaults(app_env, client):
 def test_sync_already_running_short_circuits(app_env, client, monkeypatch):
     monkeypatch.setattr(server_module.sync_mgr, "is_running", lambda: True)
 
-    resp = client.post("/sync", json={"strategy": "auto"})
+    resp = client.post("/api/sync", json={"strategy": "auto"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["started"] is False

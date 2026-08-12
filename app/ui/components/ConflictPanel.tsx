@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Card, CardTitle, Btn, Badge, EmptyState } from '@kirocrew/app-sdk/ui';
 import lucideIcons from 'lucide-react';
 import { CodePill, ErrorBlock, LoadingBlock } from './shared';
+import { API_BASE } from '../lib/api';
 
 const { ChevronDown, ChevronRight, GitCompare } = lucideIcons;
 
@@ -33,7 +34,7 @@ export function ConflictPanel() {
   const { data, isLoading, isError, refetch } = useQuery<{ conflicts: Conflict[]; total: number }>({
     queryKey: ['conflicts'],
     queryFn: async () => {
-      const response = await fetch('/api/apps/kirocrew-sync/conflicts');
+      const response = await fetch(`${API_BASE}/conflicts`);
       if (!response.ok) throw new Error('Failed to fetch conflicts');
       return response.json();
     },
@@ -41,7 +42,7 @@ export function ConflictPanel() {
 
   const resolveConflict = useMutation({
     mutationFn: async ({ id, resolution }: { id: number; resolution: string }) => {
-      const response = await fetch(`/api/apps/kirocrew-sync/conflicts/${id}/resolve`, {
+      const response = await fetch(`${API_BASE}/conflicts/${id}/resolve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ resolution }),

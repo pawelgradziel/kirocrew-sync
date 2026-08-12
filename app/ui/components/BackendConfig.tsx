@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Card, CardTitle, Btn, Badge, Input, EmptyState } from '@kirocrew/app-sdk/ui';
 import lucideIcons from 'lucide-react';
 import { CodePill, ErrorBlock, LoadingBlock, Message } from './shared';
+import { API_BASE } from '../lib/api';
 
 const { CheckCircle, AlertTriangle, Loader2, ChevronDown, ChevronRight, Server } = lucideIcons;
 
@@ -47,7 +48,7 @@ interface BackendConfigStatus {
 }
 
 async function fetchBackendConfig(backend: BackendName): Promise<BackendConfigStatus> {
-  const response = await fetch(`/api/apps/kirocrew-sync/backends/${backend}/config`);
+  const response = await fetch(`${API_BASE}/backends/${backend}/config`);
   if (!response.ok) throw new Error('Failed to fetch backend configuration');
   return response.json();
 }
@@ -102,7 +103,7 @@ function BackendConfigForm({ backend }: { backend: BackendName }) {
 
   const saveConfig = useMutation<BackendConfigStatus, Error, Record<string, string>>({
     mutationFn: async (config) => {
-      const response = await fetch(`/api/apps/kirocrew-sync/backends/${backend}/config`, {
+      const response = await fetch(`${API_BASE}/backends/${backend}/config`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ config }),
@@ -185,7 +186,7 @@ export function BackendConfig() {
   const { data, isLoading, isError, refetch } = useQuery<BackendsResponse>({
     queryKey: ['backends'],
     queryFn: async () => {
-      const response = await fetch('/api/apps/kirocrew-sync/backends');
+      const response = await fetch(`${API_BASE}/backends`);
       if (!response.ok) throw new Error('Failed to fetch backends');
       return response.json();
     },
@@ -193,7 +194,7 @@ export function BackendConfig() {
 
   const testBackend = useMutation<BackendTestResult, Error, BackendName>({
     mutationFn: async (backend) => {
-      const response = await fetch('/api/apps/kirocrew-sync/backends/test', {
+      const response = await fetch(`${API_BASE}/backends/test`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ backend }),
@@ -214,7 +215,7 @@ export function BackendConfig() {
 
   const switchBackend = useMutation<BackendSwitchResult, Error, BackendName>({
     mutationFn: async (backend) => {
-      const response = await fetch('/api/apps/kirocrew-sync/backends/switch', {
+      const response = await fetch(`${API_BASE}/backends/switch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ backend, config: {} }),

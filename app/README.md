@@ -148,9 +148,27 @@ Registered in `app.json`, runs every 5 minutes:
 
 ### API Routes
 
-All at `/api/apps/kirocrew-sync/*` (relative paths below are what
-`backend/server.py` defines; the gateway mounts them under that prefix per
-`app.json`'s `permissions.api`):
+Two different path shapes are involved, and they are NOT the same string:
+
+- **Browser-facing (what the dashboard UI fetches):**
+  `/apps/kirocrew-sync/api/<route>` — KiroCrew's gateway registers a
+  same-origin reverse proxy at `/apps/{name}/api/{path:.*}`
+  (`handle_app_api_proxy` in the gateway's `src/kiro_crew/apps/routes.py`)
+  specifically for dashboard app UIs to call their own backend without CORS.
+  This is the only path shape the UI is allowed to fetch — enforced both by
+  the app-sdk's `createScopedApi` allowlist in the browser and by
+  `app.json`'s `permissions.api`, which declares exactly this prefix.
+- **Backend-facing (what `backend/server.py` defines and what curling the
+  process directly hits):** `/api/<route>` — the proxy forwards a request
+  for `/apps/kirocrew-sync/api/<route>` to this backend as
+  `{backend_url}/api/<route>`, re-adding the `/api/` prefix it stripped off
+  the incoming route. So every route below is declared on an
+  `APIRouter(prefix="/api")` in `server.py`, `/health` excepted (see below).
+
+The `<route>` column is relative — prefix it with `/apps/kirocrew-sync/api`
+to get the real browser-facing URL, or with `/api` to get what
+`backend/server.py` actually serves and what these routes are curl-able at
+directly on the backend process:
 
 | Route | Method | Purpose |
 |-------|--------|---------|
@@ -174,6 +192,13 @@ This table was checked against the live route table (`backend.server.app.routes`
 not just read from the source: every application route the server registers is
 listed above, and none are undocumented. FastAPI's own `/docs`, `/redoc` and
 `/openapi.json` are also present but are framework-provided, not app routes.
+
+`/health` is the one route deliberately NOT under `/api/` — it's a liveness
+probe the gateway polls directly against the backend's port
+(`_health_check_loop` in the gateway's `kiro_crew/apps/backend.py`), never
+through the reverse proxy, using `app.json`'s `backend.healthCheck` (default
+`/health`). Moving it under `/api/` without also changing `healthCheck`
+would make every poll 404 and the app would never be marked healthy.
 
 ## Architecture
 

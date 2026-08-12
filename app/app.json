@@ -24,8 +24,8 @@
   "iconPath": "app/ui/assets/icon.svg",
   "permissions": {
     "api": [
-      "/api/apps/kirocrew-sync",
-      "/api/apps/kirocrew-sync/*"
+      "/apps/kirocrew-sync/api",
+      "/apps/kirocrew-sync/api/*"
     ],
     "events": [
       "notification"

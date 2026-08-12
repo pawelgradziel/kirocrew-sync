@@ -3,6 +3,7 @@ import { useQuery, useMutation } from '@tanstack/react-query';
 import { Card, CardTitle, Btn, Toggle } from '@kirocrew/app-sdk/ui';
 import lucideIcons from 'lucide-react';
 import { ErrorBlock, Message } from './shared';
+import { API_BASE } from '../lib/api';
 
 const { RotateCw, Loader2 } = lucideIcons;
 
@@ -21,7 +22,7 @@ interface DaemonControlResult {
 type ControlAction = 'start' | 'stop' | 'restart';
 
 async function controlDaemon(action: ControlAction): Promise<DaemonControlResult> {
-  const response = await fetch('/api/apps/kirocrew-sync/daemon/control', {
+  const response = await fetch(`${API_BASE}/daemon/control`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action }),
@@ -41,7 +42,7 @@ export function DaemonControl() {
   const { data, isLoading, isError, refetch } = useQuery<DaemonConfig>({
     queryKey: ['daemon-config'],
     queryFn: async () => {
-      const response = await fetch('/api/apps/kirocrew-sync/daemon/config');
+      const response = await fetch(`${API_BASE}/daemon/config`);
       if (!response.ok) throw new Error('Failed to fetch config');
       return response.json();
     },
@@ -53,7 +54,7 @@ export function DaemonControl() {
 
   const updateConfig = useMutation({
     mutationFn: async (config: Partial<DaemonConfig>) => {
-      const response = await fetch('/api/apps/kirocrew-sync/daemon/config', {
+      const response = await fetch(`${API_BASE}/daemon/config`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...data, ...config }),

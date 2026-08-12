@@ -4,6 +4,7 @@ import { Card, Btn, Badge, EmptyState } from '@kirocrew/app-sdk/ui';
 import lucideIcons from 'lucide-react';
 import { CodePill, ErrorBlock, LoadingBlock } from './shared';
 import { formatRelativeTime, formatDateTime } from '../lib/time';
+import { API_BASE } from '../lib/api';
 
 const { CheckCircle, XCircle, AlertTriangle, Clock, ChevronDown, ChevronRight, History } = lucideIcons;
 
@@ -35,7 +36,7 @@ function RunChanges({ runId }: { runId: number }) {
   const { data, isLoading, isError, refetch } = useQuery<SyncRunDetails>({
     queryKey: ['sync-history-detail', runId],
     queryFn: async () => {
-      const response = await fetch(`/api/apps/kirocrew-sync/history/${runId}`);
+      const response = await fetch(`${API_BASE}/history/${runId}`);
       if (!response.ok) throw new Error('Failed to fetch run details');
       return response.json();
     },
@@ -134,7 +135,7 @@ export function HistoryTimeline() {
   const { data, isLoading, isError, refetch } = useQuery<{ runs: SyncRun[]; total: number }>({
     queryKey: ['sync-history'],
     queryFn: async () => {
-      const response = await fetch('/api/apps/kirocrew-sync/history?limit=50');
+      const response = await fetch(`${API_BASE}/history?limit=50`);
       if (!response.ok) throw new Error('Failed to fetch history');
       return response.json();
     },

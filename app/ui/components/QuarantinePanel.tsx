@@ -3,6 +3,7 @@ import { Card, CardTitle, Btn, Badge, EmptyState } from '@kirocrew/app-sdk/ui';
 import lucideIcons from 'lucide-react';
 import { ErrorBlock, LoadingBlock } from './shared';
 import { formatRelativeTime } from '../lib/time';
+import { API_BASE } from '../lib/api';
 
 const { ShieldAlert, ShieldCheck } = lucideIcons;
 
@@ -29,7 +30,7 @@ export function QuarantinePanel() {
   const { data, isLoading, isError, refetch } = useQuery<{ machines: QuarantinedMachine[]; total: number }>({
     queryKey: ['quarantine'],
     queryFn: async () => {
-      const response = await fetch('/api/apps/kirocrew-sync/quarantine');
+      const response = await fetch(`${API_BASE}/quarantine`);
       if (!response.ok) throw new Error('Failed to fetch quarantine');
       return response.json();
     },
@@ -38,7 +39,7 @@ export function QuarantinePanel() {
   const dismissQuarantine = useMutation({
     mutationFn: async (machine: string) => {
       const response = await fetch(
-        `/api/apps/kirocrew-sync/quarantine/${encodeURIComponent(machine)}/clear`,
+        `${API_BASE}/quarantine/${encodeURIComponent(machine)}/clear`,
         { method: 'POST' }
       );
       if (!response.ok) throw new Error('Failed to dismiss quarantine record');

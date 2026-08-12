@@ -4,6 +4,7 @@ import { Card, CardTitle, Btn, Badge } from '@kirocrew/app-sdk/ui';
 import lucideIcons from 'lucide-react';
 import { Message } from './shared';
 import { formatRelativeTime } from '../lib/time';
+import { API_BASE } from '../lib/api';
 
 const { RefreshCw, CheckCircle, AlertTriangle, XCircle, ShieldAlert, Loader2 } = lucideIcons;
 
@@ -55,7 +56,7 @@ export function StatusWidget() {
   const { data, isLoading, refetch } = useQuery<{ status: SyncStatus }>({
     queryKey: ['sync-status'],
     queryFn: async () => {
-      const response = await fetch('/api/apps/kirocrew-sync/status');
+      const response = await fetch(`${API_BASE}/status`);
       if (!response.ok) throw new Error('Failed to fetch status');
       return response.json();
     },
@@ -64,7 +65,7 @@ export function StatusWidget() {
 
   const triggerSync = useMutation<SyncTriggerResult, Error, void>({
     mutationFn: async () => {
-      const response = await fetch('/api/apps/kirocrew-sync/sync', {
+      const response = await fetch(`${API_BASE}/sync`, {
         method: 'POST',
       });
       if (!response.ok) throw new Error('Failed to trigger sync');

@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Optional, Tuple
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import APIRouter, FastAPI, HTTPException, Query
 from starlette.concurrency import run_in_threadpool
 
 from .models import (
@@ -55,6 +55,24 @@ def _resolve_db_path() -> Optional[Path]:
 
 app = FastAPI(title="KiroCrew Sync API")
 
+# ---------------------------------------------------------------------------
+# /api prefix
+# ---------------------------------------------------------------------------
+#
+# The gateway's dashboard reverse proxy (handle_app_api_proxy in KiroCrew's
+# src/kiro_crew/apps/routes.py, registered at
+# `/apps/{name}/api/{path:.*}`) forwards a browser request for
+# `/apps/kirocrew-sync/api/<route>` to this backend as
+# `{backend_url}/api/<route>` -- it deliberately re-adds the `/api/` prefix
+# it stripped off the incoming route so "the backend sees its own
+# `/api/...` routes without needing any path-rewriting middleware" (that
+# gateway source's own comment). So every application route here MUST live
+# under `/api/`, or the proxy's forwarded request 404s even though curling
+# the same route at its bare path on this process works fine -- which is
+# exactly the bug this router prefix fixes. `/health` is the one deliberate
+# exception; see the note above `get_health` below for why.
+router = APIRouter(prefix="/api")
+
 # Initialize managers. This is *mostly* raise-free on a machine where the
 # bash sync engine isn't installed: SyncManager/BackendManager resolve their
 # paths lazily and only raise SyncEngineUnavailable from operations that
@@ -90,13 +108,24 @@ def _internal_error(where: str, exc: Exception) -> HTTPException:
 #
 # KiroCrew's gateway polls this endpoint (backend.healthCheck, default
 # "/health") in a background loop right after spawning the backend process,
-# and only starts proxying /api/apps/kirocrew-sync/* traffic to us once it
+# and only starts proxying /apps/kirocrew-sync/api/* traffic to us once it
 # responds with a non-error status (see _health_check_loop /
 # get_app_backend_port in the gateway's kiro_crew/apps/backend.py). It is
 # polled repeatedly for the lifetime of the app, so the handler must stay
 # trivially cheap and must NEVER touch the database, the sync engine, or any
 # subprocess -- unlike /status (which does), this can't be allowed to block
 # or fail because of something unrelated to "is the process alive".
+#
+# Deliberately registered on `app`, NOT `router`: _health_check_loop builds
+# its URL as `http://127.0.0.1:{port}{manifest.backend.healthCheck}` and
+# hits it DIRECTLY against this process's port -- it does not go through the
+# gateway's reverse proxy at all, so it never gets the `/api/` prefix the
+# proxy re-adds for every other route. app.json does not override
+# `backend.healthCheck`, so the gateway polls the default `/health` at the
+# root; moving this route under `/api/` would make every health check 404
+# and the app would never be marked healthy (and the proxy would then have
+# nothing to resolve a target against -- see the enablement gate in
+# handle_app_api_proxy).
 
 @app.get("/health")
 async def get_health():
@@ -234,7 +263,7 @@ def _compute_status() -> SyncStatus:
     )
 
 
-@app.get("/status", response_model=SyncStatusResponse)
+@router.get("/status", response_model=SyncStatusResponse)
 async def get_status():
     """Get current sync status."""
     try:
@@ -248,7 +277,7 @@ async def get_status():
 # /sync
 # ---------------------------------------------------------------------------
 
-@app.post("/sync", response_model=SyncTriggerResponse)
+@router.post("/sync", response_model=SyncTriggerResponse)
 async def trigger_sync(body: Optional[SyncTriggerRequest] = None):
     """Trigger manual sync. Body is optional; a body-less POST uses defaults
     (strategy=auto, team=False, dry_run=False)."""
@@ -368,7 +397,7 @@ def _get_history(limit: int, offset: int, scope: Optional[str]) -> HistoryRespon
     return HistoryResponse(runs=runs, total=total, limit=limit, offset=offset)
 
 
-@app.get("/history", response_model=HistoryResponse)
+@router.get("/history", response_model=HistoryResponse)
 async def get_history(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
@@ -381,7 +410,7 @@ async def get_history(
         raise _internal_error("GET /history", e)
 
 
-@app.get("/history/{run_id}")
+@router.get("/history/{run_id}")
 async def get_run_details(run_id: int):
     """Get detailed sync run information."""
     try:
@@ -400,7 +429,7 @@ async def get_run_details(run_id: int):
 # /conflicts
 # ---------------------------------------------------------------------------
 
-@app.get("/conflicts", response_model=ConflictsResponse)
+@router.get("/conflicts", response_model=ConflictsResponse)
 async def get_conflicts():
     """Get unresolved conflicts."""
     try:
@@ -414,7 +443,7 @@ async def get_conflicts():
         raise _internal_error("GET /conflicts", e)
 
 
-@app.post("/conflicts/{conflict_id}/resolve")
+@router.post("/conflicts/{conflict_id}/resolve")
 async def resolve_conflict(conflict_id: int, resolution: ConflictResolution):
     """Resolve a conflict."""
     try:
@@ -436,7 +465,7 @@ async def resolve_conflict(conflict_id: int, resolution: ConflictResolution):
 # /quarantine
 # ---------------------------------------------------------------------------
 
-@app.get("/quarantine", response_model=QuarantineResponse)
+@router.get("/quarantine", response_model=QuarantineResponse)
 async def get_quarantine():
     """Get quarantined machines."""
     try:
@@ -450,7 +479,7 @@ async def get_quarantine():
         raise _internal_error("GET /quarantine", e)
 
 
-@app.post("/quarantine/{machine}/clear")
+@router.post("/quarantine/{machine}/clear")
 async def clear_quarantine(machine: str):
     """Clear machine from quarantine."""
     try:
@@ -476,7 +505,7 @@ def _list_backends() -> BackendsResponse:
     return BackendsResponse(current=current, available=available)
 
 
-@app.get("/backends", response_model=BackendsResponse)
+@router.get("/backends", response_model=BackendsResponse)
 async def list_backends():
     """List available backends."""
     try:
@@ -485,7 +514,7 @@ async def list_backends():
         raise _internal_error("GET /backends", e)
 
 
-@app.post("/backends/test", response_model=BackendTestResult)
+@router.post("/backends/test", response_model=BackendTestResult)
 async def test_backend(body: BackendTestRequest):
     """Test backend connection."""
     try:
@@ -494,7 +523,7 @@ async def test_backend(body: BackendTestRequest):
         raise _internal_error("POST /backends/test", e)
 
 
-@app.post("/backends/switch")
+@router.post("/backends/switch")
 async def switch_backend(config: BackendConfig):
     """Switch to a different backend, applying any `config` values passed
     alongside it (validated against that backend's known settings) as part
@@ -518,7 +547,7 @@ async def switch_backend(config: BackendConfig):
         raise _internal_error("POST /backends/switch", e)
 
 
-@app.get("/backends/{name}/config", response_model=BackendConfigStatus)
+@router.get("/backends/{name}/config", response_model=BackendConfigStatus)
 async def get_backend_config(name: BackendName):
     """Effective settings for one backend -- which are explicitly set (in
     config.sh or the environment) vs. defaulted, with anything
@@ -531,7 +560,7 @@ async def get_backend_config(name: BackendName):
         raise _internal_error(f"GET /backends/{name}/config", e)
 
 
-@app.put("/backends/{name}/config", response_model=BackendConfigStatus)
+@router.put("/backends/{name}/config", response_model=BackendConfigStatus)
 async def update_backend_config(name: BackendName, body: BackendConfigUpdate):
     """Persist settings for one backend into config.sh. Keys not known to
     belong to this backend are rejected (400) rather than written; values
@@ -555,7 +584,7 @@ async def update_backend_config(name: BackendName, body: BackendConfigUpdate):
 # /daemon
 # ---------------------------------------------------------------------------
 
-@app.get("/daemon/config", response_model=DaemonConfig)
+@router.get("/daemon/config", response_model=DaemonConfig)
 async def get_daemon_config():
     """Get daemon configuration."""
     try:
@@ -566,7 +595,7 @@ async def get_daemon_config():
         raise _internal_error("GET /daemon/config", e)
 
 
-@app.put("/daemon/config", response_model=DaemonConfig)
+@router.put("/daemon/config", response_model=DaemonConfig)
 async def update_daemon_config(config: DaemonConfig):
     """Update daemon configuration."""
     try:
@@ -601,7 +630,7 @@ def _control_daemon(action: str) -> Tuple[bool, str]:
     return success, message
 
 
-@app.post("/daemon/control")
+@router.post("/daemon/control")
 async def control_daemon(control: DaemonControl):
     """
     Control the daemon (start/stop/restart) by driving the real lock/PID
@@ -616,3 +645,10 @@ async def control_daemon(control: DaemonControl):
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise _internal_error("POST /daemon/control", e)
+
+
+# Mount every `/api/...` route defined above onto the app. Must come after
+# all `@router...` decorators run (i.e. at module scope, after the route
+# definitions), and is deliberately separate from `/health`, which is
+# registered directly on `app` above -- see the comment there.
+app.include_router(router)
