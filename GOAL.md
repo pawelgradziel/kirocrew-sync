@@ -89,10 +89,43 @@ A user can:
 - ✅ Summary document created
 - ✅ Implementation plan created
 - ✅ Phase 1: Foundation complete (app.json, database schema, models)
-- ✅ Phase 2: Backend complete (all managers, FastAPI server, 15 routes)
-- 🔄 **Next**: Phase 3 - UI components or test backend
-- ⏳ Then: Phase 4 - Polish and error handling
-- ⏳ Then: Phase 5 - End-to-end testing
+- ✅ Phase 2: Backend complete (all managers, FastAPI server, 20 routes)
+- ✅ Phase 3: UI complete (6 dashboard components incl. BackendConfig)
+- ✅ Phase 4: Notifications, error handling, loading/empty/error states
+- ✅ Phase 5: 180 unit tests passing, hermetic (never touches ~/.kiro/crew)
+
+**Verified against the real KiroCrew host source** (`/home/pawel/code/kirocrew`):
+`app.json` passes the host's own `AppManifest.validate()`, and the notification
+transport uses the routes the gateway actually registers.
+
+### Known limitations — read before calling this done
+
+These are real gaps, deliberately recorded rather than hidden:
+
+1. **Daemon interval/scope config is decorative.** `lib/daemon.sh` hardcodes
+   `INTERVAL_IDLE/ACTIVE/BACKOFF` and never reads the app's `daemon_state`
+   table, so `PUT /daemon/config {"interval": N}` does not change what the
+   running daemon does. `next_sync` now returns `null` rather than fabricating
+   a schedule the daemon does not follow.
+2. **Syncs run by the bash daemon are invisible to the app.** Artifact
+   ingestion happens only in `POST /sync`. A daemon-only user will see empty
+   `/conflicts` and `/quarantine`, because each daemon run truncates and
+   rewrites those logs before the app ever reads them. The app.json cron
+   (backend-driven) is the path that works today.
+3. **`sync_changes` is never populated.** `GET /history/:id` always returns
+   `changes: []`. The table, model and CHECK constraints exist but nothing
+   writes to them, so "what changed" per run is not available yet.
+4. **A SIGKILLed daemon can orphan a running sync.** `kirocrew-sync.sh` has no
+   lock of its own, so a sync it spawned survives. The API says so rather than
+   claiming a clean stop.
+5. **UI is not compile-verified.** This repo ships no build tooling for the
+   React components (`@/components/ui/*` resolves inside the host app), so the
+   .tsx files have never been type-checked or rendered.
+6. **Never run end-to-end against a real remote backend.** gdrive/s3/rsync
+   paths are exercised only against stubs and a local directory.
+7. **`iconPath` only resolves if published to a registry.** A side-loaded
+   install has no route serving an app's own `ui/` dir; the lucide `icon`
+   name is what actually renders in the nav.
 
 ## What's Built So Far
 
@@ -111,6 +144,21 @@ A user can:
 - `install-app.sh` - Installation script
 - `test_backend.py` - Backend validation tests
 
+**UI** (Phase 3):
+- `app/ui/components/SyncDashboard.tsx` - page layout, 4 tabs
+- `app/ui/components/StatusWidget.tsx` - status, Sync Now
+- `app/ui/components/DaemonControl.tsx` - start/stop/restart, scope, interval
+- `app/ui/components/HistoryTimeline.tsx` - timeline, expand for run detail
+- `app/ui/components/ConflictPanel.tsx` - resolve + local/remote diff
+- `app/ui/components/QuarantinePanel.tsx` - quarantined machines
+- `app/ui/components/BackendConfig.tsx` - cards, test, switch, configure form
+- `app/ui/assets/icon.svg` - theme-agnostic stroke mark
+
+**Phase 4/5 additions**:
+- `app/backend/notifications.py` - 4 channels, dedup, degrades without transport
+- `app/backend/artifacts.py` - parses conflicts.jsonl / quarantine.txt
+- `app/tests/` - 180 tests
+
 **Routes Implemented**:
 - GET /status - current sync state
 - POST /sync - trigger manual sync
@@ -123,6 +171,8 @@ A user can:
 - GET /backends - available backends
 - POST /backends/test - test connection
 - POST /backends/switch - switch backend
+- GET /backends/:name/config - effective settings for one backend
+- PUT /backends/:name/config - persist settings (shell-quoted, injection-tested)
 - GET /daemon/config - get daemon config
 - PUT /daemon/config - update daemon config
 - POST /daemon/control - start/stop/restart daemon

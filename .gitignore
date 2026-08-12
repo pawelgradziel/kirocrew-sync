@@ -38,3 +38,6 @@ Thumbs.db
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Local dev virtualenv for the KiroCrew app backend
+.venv/

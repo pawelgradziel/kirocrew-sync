@@ -15,7 +15,12 @@ class ConflictManager:
     
     def __init__(self, db_path: Optional[Path] = None):
         self.db = Database(db_path)
-    
+        # Ensure schema exists. Without this the manager only works when some
+        # other manager (HistoryManager) happened to be constructed first --
+        # every query here fails with "no such table: conflicts" on a fresh
+        # database. initialize() is idempotent, so paying it twice is free.
+        self.db.initialize()
+
     def record_conflict(
         self,
         run_id: int,
@@ -23,17 +28,33 @@ class ConflictManager:
         table_name: str,
         row_id: str,
         local_value: Optional[str] = None,
-        remote_value: Optional[str] = None
+        remote_value: Optional[str] = None,
+        resolved: bool = False,
+        resolution: Optional[str] = None
     ) -> int:
-        """Record a conflict from sync."""
+        """
+        Record a conflict from sync.
+
+        Most conflicts arrive already resolved: the bash merge drivers
+        (lib/kcsync/merge.py) apply an automatic strategy for everything
+        except "manual", so `resolved`/`resolution` let a caller record that
+        outcome directly instead of resolving it again through the API.
+        Defaults (unresolved, no resolution) preserve prior behavior for
+        existing callers.
+        """
         with self.db.connect() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO conflicts (
-                    run_id, machine, table_name, row_id, local_value, remote_value
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    run_id, machine, table_name, row_id, local_value, remote_value,
+                    resolved, resolution, resolved_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (run_id, machine, table_name, row_id, local_value, remote_value)
+                (
+                    run_id, machine, table_name, row_id, local_value, remote_value,
+                    resolved, resolution,
+                    datetime.now().isoformat() if resolved else None
+                )
             )
             conn.commit()
             return cursor.lastrowid
@@ -67,13 +88,22 @@ class ConflictManager:
             ]
     
     def resolve_conflict(self, conflict_id: int, resolution: str) -> bool:
-        """Mark conflict as resolved."""
+        """
+        Mark an unresolved conflict as resolved.
+
+        The WHERE clause requires `resolved = 0`, so this only ever touches
+        a conflict that is still unresolved. Without that, resolving the
+        same id twice returned True both times and silently overwrote the
+        first resolution (including its resolved_at) with the second one --
+        now a second call is a no-op that honestly reports False, leaving
+        the original resolution/resolved_at untouched.
+        """
         with self.db.connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE conflicts
                 SET resolved = 1, resolution = ?, resolved_at = ?
-                WHERE id = ?
+                WHERE id = ? AND resolved = 0
                 """,
                 (resolution, datetime.now().isoformat(), conflict_id)
             )

@@ -173,7 +173,7 @@ User can pause/resume from:
         "id": "conflict-detected",
         "name": "Conflict detected",
         "icon": "AlertTriangle",
-        "defaultPriority": "medium"
+        "defaultPriority": "default"
       },
       {
         "id": "quarantine",

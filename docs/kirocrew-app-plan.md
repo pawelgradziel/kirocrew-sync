@@ -84,7 +84,7 @@ cd ~/.kiro/crew/apps/kirocrew-sync
         "id": "conflict-detected",
         "name": "Conflict detected",
         "icon": "AlertTriangle",
-        "defaultPriority": "medium"
+        "defaultPriority": "default"
       },
       {
         "id": "quarantine",

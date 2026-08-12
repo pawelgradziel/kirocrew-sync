@@ -20,7 +20,8 @@
     "Team scope for knowledge sharing without personal data"
   ],
   "defaultEnabled": false,
-  "iconUrl": "/app-assets/kirocrew-sync/icon.svg",
+  "icon": "RefreshCw",
+  "iconPath": "app/ui/assets/icon.svg",
   "permissions": {
     "api": [
       "/api/apps/kirocrew-sync",
@@ -70,7 +71,7 @@
         "id": "conflict-detected",
         "name": "Conflict detected",
         "icon": "AlertTriangle",
-        "defaultPriority": "medium"
+        "defaultPriority": "default"
       },
       {
         "id": "quarantine",

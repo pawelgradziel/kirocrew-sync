@@ -4,9 +4,12 @@ Database schema for KiroCrew Sync app.
 Stores sync history, conflicts, quarantine status, and daemon state.
 """
 
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # Database schema
 SCHEMA = """
@@ -108,7 +111,7 @@ class Database:
         with self.connect() as conn:
             conn.executescript(SCHEMA)
             conn.commit()
-        print(f"✅ Database initialized at {self.db_path}")
+        logger.info("Database initialized at %s", self.db_path)
     
     def reset(self):
         """Reset database (delete and recreate)."""
@@ -127,3 +130,4 @@ if __name__ == "__main__":
         db.reset()
     else:
         db.initialize()
+        print(f"✅ Database initialized at {db.db_path}")
