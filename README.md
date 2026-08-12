@@ -1,6 +1,9 @@
 # KiroCrew Sync
 
-Cross-platform synchronization for KiroCrew data with modular storage backends.
+**A KiroCrew app** — installs into KiroCrew and adds a **Crew Sync** page to
+the sidebar — plus the cross-platform sync engine behind it, with modular
+storage backends. Usable either way: run the CLI directly, or drive it from
+the dashboard.
 
 **Work on two machines without choosing which one wins.** Most sync tools for
 this kind of data copy a directory in one direction and overwrite whatever was
@@ -11,6 +14,22 @@ since then, and combines both.
 ```bash
 ./kirocrew-sync.sh sync
 ```
+
+## As a KiroCrew app
+
+```bash
+./install-app.sh
+```
+
+Then trust it under **Settings → Security → Third-party apps** (KiroCrew denies
+third-party app code by default) and enable it under **Apps → Crew Sync**. The
+dashboard page gives you sync status, a history timeline, conflict and
+quarantine panels, daemon controls and backend configuration with a
+"Test Connection" button — everything the CLI does, without the CLI.
+
+See [`app/README.md`](app/README.md) for the app's architecture, its API
+routes and how to build the UI bundle, and [`GOAL.md`](GOAL.md) for the
+current state and its known limitations.
 
 ## What is it for?
 

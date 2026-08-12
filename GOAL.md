@@ -92,11 +92,35 @@ A user can:
 - ✅ Phase 2: Backend complete (all managers, FastAPI server, 20 routes)
 - ✅ Phase 3: UI complete (6 dashboard components incl. BackendConfig)
 - ✅ Phase 4: Notifications, error handling, loading/empty/error states
-- ✅ Phase 5: 180 unit tests passing, hermetic (never touches ~/.kiro/crew)
+- ✅ Phase 5: 207 unit tests passing, hermetic (never touches ~/.kiro/crew)
+
+**Confirmed working on a live install**, not just in tests: the dashboard
+renders in KiroCrew, browser → gateway proxy → backend → bash engine → SQLite
+→ UI works end to end, and a real sync merged 400 rows and recorded them in
+the history timeline.
 
 **Verified against the real KiroCrew host source** (`/home/pawel/code/kirocrew`):
 `app.json` passes the host's own `AppManifest.validate()`, and the notification
 transport uses the routes the gateway actually registers.
+
+### Engine fixes this work required
+
+The app could not work until three pre-existing bugs in the sync engine were
+fixed. All three reproduce on `master` and were not introduced here:
+
+- `init` was unreachable. The config guard exited when `config.sh` was
+  missing — including for `init`, the command that creates it — so its own
+  advice ("Run: ./kirocrew-sync.sh init") could not be followed.
+- Nothing ran at all, even configured: `lib/daemon.sh` was sourced ~16 lines
+  before `SYNC_ROOT` is assigned, so under `set -u` every command died with
+  `SYNC_ROOT: unbound variable`. Bug 1 masked bug 2.
+- The write-back refused whenever KiroCrew was running, which a KiroCrew app
+  can never satisfy. It now uses the same idle heuristic `lib/daemon.sh`
+  already documented.
+
+`tests/run_tests.sh` went from **25 passed / 34 failed on master** to
+**59 / 0**. Note one caveat: two consecutive runs of identical code reported
+58/1 and then 59/0, so at least one assertion in that suite is flaky.
 
 ### Known limitations — read before calling this done
 
@@ -105,27 +129,57 @@ These are real gaps, deliberately recorded rather than hidden:
 1. **Daemon interval/scope config is decorative.** `lib/daemon.sh` hardcodes
    `INTERVAL_IDLE/ACTIVE/BACKOFF` and never reads the app's `daemon_state`
    table, so `PUT /daemon/config {"interval": N}` does not change what the
-   running daemon does. `next_sync` now returns `null` rather than fabricating
-   a schedule the daemon does not follow.
-2. **Syncs run by the bash daemon are invisible to the app.** Artifact
-   ingestion happens only in `POST /sync`. A daemon-only user will see empty
-   `/conflicts` and `/quarantine`, because each daemon run truncates and
-   rewrites those logs before the app ever reads them. The app.json cron
-   (backend-driven) is the path that works today.
+   running daemon does. `next_sync` returns `null` rather than fabricating a
+   schedule the daemon does not follow, and the dashboard's interval slider
+   does not change the daemon's real cadence.
+2. **Syncs run by the bash daemon are still invisible to the app.** The app's
+   own cron records everything (it runs `backend/cli.py`, which shares the
+   sync-and-record path with `POST /api/sync`), but `kirocrew-sync.sh daemon`
+   writes nothing to the app's database, so a daemon-only user still sees
+   empty `/conflicts` and `/quarantine`.
 3. **`sync_changes` is never populated.** `GET /history/:id` always returns
-   `changes: []`. The table, model and CHECK constraints exist but nothing
-   writes to them, so "what changed" per run is not available yet.
+   `changes: []`, which the UI renders as "No detailed changes recorded for
+   this run". The table, model and CHECK constraints exist but nothing writes
+   to them, so per-run "what changed" is not available yet.
 4. **A SIGKILLed daemon can orphan a running sync.** `kirocrew-sync.sh` has no
    lock of its own, so a sync it spawned survives. The API says so rather than
    claiming a clean stop.
-5. **UI is not compile-verified.** This repo ships no build tooling for the
-   React components (`@/components/ui/*` resolves inside the host app), so the
-   .tsx files have never been type-checked or rendered.
-6. **Never run end-to-end against a real remote backend.** gdrive/s3/rsync
+5. **Syncs are refused while KiroCrew is actively writing.** Packing into
+   databases KiroCrew has open risks corruption, so a sync backs off when any
+   of KiroCrew's own `*.db` files changed in the last minute (our own subtrees
+   — `$SYNC_ROOT` and `apps/` — are excluded, or a sync's own bookkeeping
+   would block the next one). In practice KiroCrew falls quiet within ~20s,
+   but a sync landing in a busy window fails and must be retried. Residual
+   risk: a write beginning inside that one-minute window.
+6. **Replacing the app's cron requires deleting it by hand.** KiroCrew
+   registers app crons with `add_job_if_absent_async`, which never updates an
+   existing job — so changing the cron in `app.json` has no effect on an
+   already-installed app until the job is deleted in Schedule.
+7. **Notification dedup does not apply to cron runs.** The 5-minute window
+   lives in process memory and the cron process exits each tick. Quarantine
+   dedups against the database and conflict/completed notifications key off
+   per-run ids, so in practice only a persistently failing sync re-notifies
+   every tick. A proper fix is database-backed dedup.
+8. **Never run end-to-end against a real remote backend.** gdrive/s3/rsync
    paths are exercised only against stubs and a local directory.
-7. **`iconPath` only resolves if published to a registry.** A side-loaded
+9. **`iconPath` only resolves if published to a registry.** A side-loaded
    install has no route serving an app's own `ui/` dir; the lucide `icon`
    name is what actually renders in the nav.
+
+### Diagnosing it
+
+- `~/.kiro/crew/apps/kirocrew-sync/data/backend.log` — one line per HTTP
+  request (method, path, status, duration), plus a startup block naming the
+  resolved data dir, the sync-engine dir, whether the engine was found, and
+  every registered route. Level via `KIROCREW_SYNC_LOG_LEVEL`.
+- `.../data/cron.log` — the same for cron runs, deliberately a separate file
+  (two processes sharing one rotating handler lose segments).
+- Dashboard errors show the HTTP status, the server's message and the URL
+  requested, and distinguish a network failure from an HTTP error.
+- **Two path shapes, easily confused:** the browser calls
+  `/apps/kirocrew-sync/api/<route>`; the gateway re-adds the prefix and the
+  backend serves `/api/<route>`. `/health` is the one exception — the gateway
+  polls it directly on the backend port, bypassing the proxy.
 
 ## What's Built So Far
 
