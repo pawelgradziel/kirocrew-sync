@@ -170,7 +170,7 @@ check_kirocrew_running() {
 
     local self
     self="$(basename "${BASH_SOURCE[0]}")"
-    local pid args
+    local pid args running_as=""
 
     while IFS= read -r pid; do
         [ -n "$pid" ] || continue
@@ -179,13 +179,36 @@ check_kirocrew_running() {
         case "$args" in
             "" | *"$self"*) continue ;;
         esac
-        log_error "KiroCrew is running. Stop it before writing merged data back."
-        log_info "Running as: $args"
-        log_info "Reading is safe; writing is not. Quit KiroCrew and re-run."
-        return 1
+        running_as="$args"
+        break
     done < <(pgrep -f "kirocrew" 2>/dev/null || true)
 
-    return 0
+    # Nothing else running: unambiguously safe.
+    [ -n "$running_as" ] || return 0
+
+    # KiroCrew is up. Refusing outright made this unusable from the KiroCrew
+    # *app*, which by definition only ever runs with KiroCrew up -- so "Sync
+    # Now" in the dashboard could never apply anything. It also contradicted
+    # lib/daemon.sh, whose should_sync_now() is documented as "run only if
+    # KiroCrew is closed, or if it's open but idle": the daemon would decide a
+    # sync was safe and then be refused here anyway.
+    #
+    # Use that same idleness heuristic. An open-but-idle KiroCrew is not
+    # mid-transaction, so packing is safe; one that wrote a database in the
+    # last minute may well be, and is still refused.
+    local recent_writes
+    recent_writes="$(find "$KIROCREW_DIR" -name "*.db" -mmin -1 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "${recent_writes:-0}" -eq 0 ]; then
+        log_warn "KiroCrew is running but idle; applying merged data anyway."
+        log_info "Running as: $running_as"
+        return 0
+    fi
+
+    log_error "KiroCrew is running and actively writing. Leaving your data alone."
+    log_info "Running as: $running_as"
+    log_info "$recent_writes database file(s) changed in the last minute."
+    log_info "Retry shortly, or quit KiroCrew for a guaranteed-clean write."
+    return 1
 }
 
 get_machine_id() {
