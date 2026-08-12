@@ -1,12 +1,14 @@
 import { useState } from 'react';
-import { SegmentedControl, type Segment } from '@kirocrew/ui';
-import { History, GitCompare, ShieldAlert, Server } from 'lucide-react';
+import { SegmentedControl, type Segment } from '@kirocrew/app-sdk/ui';
+import lucideIcons from 'lucide-react';
 import { StatusWidget } from './StatusWidget';
 import { DaemonControl } from './DaemonControl';
 import { HistoryTimeline } from './HistoryTimeline';
 import { ConflictPanel } from './ConflictPanel';
 import { QuarantinePanel } from './QuarantinePanel';
 import { BackendConfig } from './BackendConfig';
+
+const { History, GitCompare, ShieldAlert, Server } = lucideIcons;
 
 type TabKey = 'history' | 'conflicts' | 'quarantine' | 'backend';
 

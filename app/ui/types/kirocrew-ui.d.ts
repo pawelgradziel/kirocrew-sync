@@ -1,9 +1,20 @@
-// Ambient type declarations for @kirocrew/ui — the host's shared component
-// library (see website/src/kirocrew-ui/index.ts and website/src/components/ui.tsx
-// in the kirocrew repo). Editor/type-check convenience only: at runtime this
-// specifier is resolved through the host's import map, never bundled (see
-// ../esbuild.config.mjs). Kept intentionally narrow — only what this app uses.
-declare module '@kirocrew/ui' {
+// Ambient type declarations for @kirocrew/app-sdk/ui — the host's shared
+// component library (see website/src/kirocrew-ui/index.ts and
+// website/src/components/ui.tsx in the kirocrew repo, and
+// /vendor/kirocrew-ui.mjs in a running KiroCrew build's served dist). Editor/
+// type-check convenience only: at runtime this specifier is resolved through
+// the host's import map, never bundled (see ../esbuild.config.mjs).
+//
+// The module specifier is '@kirocrew/app-sdk/ui', NOT '@kirocrew/ui' —
+// '@kirocrew/ui' is only the host's internal module name and is absent from
+// the served import map, so importing it crashes at module resolution.
+//
+// Kept intentionally narrow — only what this app uses, and only names the
+// vendor stub actually exports. Note SourceBadge is NOT in that stub's fixed
+// destructure list (see /vendor/kirocrew-ui.mjs) and is deliberately omitted
+// here even though the host's TS source defines it — importing it from this
+// app would type-check but crash at runtime.
+declare module '@kirocrew/app-sdk/ui' {
   import type { ComponentPropsWithoutRef, ReactNode } from 'react';
 
   export function Card(
@@ -34,8 +45,6 @@ declare module '@kirocrew/ui' {
       'children' | 'dangerouslySetInnerHTML'
     > & { children: ReactNode }
   ): JSX.Element;
-
-  export function SourceBadge(props: { source: string }): JSX.Element;
 
   export function StatCard(
     props: {

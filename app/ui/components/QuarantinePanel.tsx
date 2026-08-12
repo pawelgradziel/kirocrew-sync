@@ -1,8 +1,10 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Card, CardTitle, Btn, Badge, EmptyState } from '@kirocrew/ui';
-import { ShieldAlert, ShieldCheck } from 'lucide-react';
+import { Card, CardTitle, Btn, Badge, EmptyState } from '@kirocrew/app-sdk/ui';
+import lucideIcons from 'lucide-react';
 import { ErrorBlock, LoadingBlock } from './shared';
 import { formatRelativeTime } from '../lib/time';
+
+const { ShieldAlert, ShieldCheck } = lucideIcons;
 
 interface QuarantinedMachine {
   id: number;

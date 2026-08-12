@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Card, CardTitle, Btn, Badge } from '@kirocrew/ui';
-import { RefreshCw, CheckCircle, AlertTriangle, XCircle, ShieldAlert, Loader2 } from 'lucide-react';
+import { Card, CardTitle, Btn, Badge } from '@kirocrew/app-sdk/ui';
+import lucideIcons from 'lucide-react';
 import { Message } from './shared';
 import { formatRelativeTime } from '../lib/time';
+
+const { RefreshCw, CheckCircle, AlertTriangle, XCircle, ShieldAlert, Loader2 } = lucideIcons;
 
 interface SyncStatus {
   state: 'idle' | 'syncing' | 'conflict' | 'failed' | 'quarantine';

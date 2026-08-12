@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Card, CardTitle, Btn, Badge, Input, EmptyState } from '@kirocrew/ui';
-import { CheckCircle, AlertTriangle, Loader2, ChevronDown, ChevronRight, Server } from 'lucide-react';
+import { Card, CardTitle, Btn, Badge, Input, EmptyState } from '@kirocrew/app-sdk/ui';
+import lucideIcons from 'lucide-react';
 import { CodePill, ErrorBlock, LoadingBlock, Message } from './shared';
+
+const { CheckCircle, AlertTriangle, Loader2, ChevronDown, ChevronRight, Server } = lucideIcons;
 
 type BackendName = 'gdrive' | 's3' | 'rsync' | 'local';
 

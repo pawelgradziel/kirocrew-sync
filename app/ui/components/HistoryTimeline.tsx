@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Card, Btn, Badge, EmptyState } from '@kirocrew/ui';
-import { CheckCircle, XCircle, AlertTriangle, Clock, ChevronDown, ChevronRight, History } from 'lucide-react';
+import { Card, Btn, Badge, EmptyState } from '@kirocrew/app-sdk/ui';
+import lucideIcons from 'lucide-react';
 import { CodePill, ErrorBlock, LoadingBlock } from './shared';
 import { formatRelativeTime, formatDateTime } from '../lib/time';
+
+const { CheckCircle, XCircle, AlertTriangle, Clock, ChevronDown, ChevronRight, History } = lucideIcons;
 
 interface SyncRun {
   id: number;

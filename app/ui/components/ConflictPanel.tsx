@@ -1,8 +1,10 @@
 import { Fragment, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Card, CardTitle, Btn, Badge, EmptyState } from '@kirocrew/ui';
-import { ChevronDown, ChevronRight, GitCompare } from 'lucide-react';
+import { Card, CardTitle, Btn, Badge, EmptyState } from '@kirocrew/app-sdk/ui';
+import lucideIcons from 'lucide-react';
 import { CodePill, ErrorBlock, LoadingBlock } from './shared';
+
+const { ChevronDown, ChevronRight, GitCompare } = lucideIcons;
 
 interface Conflict {
   id: number;

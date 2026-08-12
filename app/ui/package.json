@@ -5,7 +5,8 @@
   "description": "Dashboard UI bundle for the Crew Sync KiroCrew app. Built with esbuild into dist/index.mjs, which is what ships (and is committed) — this package.json and node_modules are dev-only and never installed on a target machine.",
   "type": "module",
   "scripts": {
-    "build": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs && node verify-bundle.mjs",
+    "verify-bundle": "node verify-bundle.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "devDependencies": {
@@ -13,7 +14,9 @@
     "typescript": "^5.6.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
-    "lucide-react": "1.7.0",
+    "lucide-react": "1.7.0"
+  },
+  "dependencies": {
     "@tanstack/react-query": "5.96.0"
   }
 }

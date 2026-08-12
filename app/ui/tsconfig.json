@@ -12,8 +12,9 @@
     "isolatedModules": true,
     "resolveJsonModule": true,
     "paths": {
-      "@kirocrew/ui": ["./types/kirocrew-ui.d.ts"],
-      "@kirocrew/app-sdk": ["./types/kirocrew-app-sdk.d.ts"]
+      "@kirocrew/app-sdk/ui": ["./types/kirocrew-ui.d.ts"],
+      "@kirocrew/app-sdk": ["./types/kirocrew-app-sdk.d.ts"],
+      "lucide-react": ["./types/lucide-react.d.ts"]
     }
   },
   "include": ["**/*.ts", "**/*.tsx"],

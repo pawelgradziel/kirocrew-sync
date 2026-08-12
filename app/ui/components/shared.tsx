@@ -1,6 +1,8 @@
 import type { ReactNode } from 'react';
-import { CheckCircle, XCircle, Loader2 } from 'lucide-react';
-import { Btn } from '@kirocrew/ui';
+import lucideIcons from 'lucide-react';
+import { Btn } from '@kirocrew/app-sdk/ui';
+
+const { CheckCircle, XCircle, Loader2 } = lucideIcons;
 
 export type MessageTone = 'success' | 'error';
 

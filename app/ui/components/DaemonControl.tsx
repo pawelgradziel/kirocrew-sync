@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
-import { Card, CardTitle, Btn, Toggle } from '@kirocrew/ui';
-import { RotateCw, Loader2 } from 'lucide-react';
+import { Card, CardTitle, Btn, Toggle } from '@kirocrew/app-sdk/ui';
+import lucideIcons from 'lucide-react';
 import { ErrorBlock, Message } from './shared';
+
+const { RotateCw, Loader2 } = lucideIcons;
 
 interface DaemonConfig {
   enabled: boolean;
