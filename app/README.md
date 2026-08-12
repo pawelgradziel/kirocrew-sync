@@ -13,18 +13,38 @@ Requires `kirocrew-sync` to already be installed at
 checks both up front and aborts with a clear error (without copying anything)
 if either is missing.
 
-This will:
-1. Copy `app.json`, the whole `backend/` directory, the whole `ui/` directory
-   (components + the `icon.svg` asset), and `requirements.txt` to
-   `~/.kiro/crew/apps/kirocrew-sync/`
-2. Initialize the history database (safe to re-run — schema uses
-   `CREATE TABLE IF NOT EXISTS` / `INSERT OR IGNORE`, so it never wipes
-   existing history)
-3. Write/refresh `installed.json`
+The script tries two paths, in order:
 
-The script is safe to re-run any time to pick up a newer checkout: it
-overwrites app files but preserves sync history and the original
-`installedAt` timestamp (a separate `updatedAt` field tracks the latest run).
+1. **Through the gateway (preferred).** If a KiroCrew gateway is reachable on
+   `localhost` (`http://127.0.0.1:5476` by default; override with
+   `KIROCREW_PORT`), the script mints a short-lived local token from
+   `~/.kiro/crew/.local_secret` (the same loopback-only bootstrap KiroCrew's
+   own local tooling uses — see `GET /api/token/local`) and calls the real
+   `POST /api/apps/install` transaction, pointed at this repo's `app/`
+   directory. This is the same thing the dashboard's **Apps → (sources icon)
+   → Install from Path** does, and it's the only path that registers the
+   app's agents/skills/crons, starts its backend, and generates its
+   `.app_secret`. If the app is already installed this way, the script calls
+   the update endpoint instead, so re-running is idempotent either way.
+
+2. **Offline staging (fallback).** If no gateway is reachable, the script
+   copies `app.json`, the whole `backend/` directory, the whole `ui/`
+   directory, and `requirements.txt` to `~/.kiro/crew/apps/kirocrew-sync/`
+   itself, initializes the history database schema, and writes a complete
+   `installed.json` (with the app's real `name`, `origin: "local"`,
+   `resources`/`lifecycle: "gateway"`) plus a freshly generated
+   `.app_secret` — matching what the gateway's own installer would have
+   produced. It does **not** register agents/skills/crons or start the
+   backend; only a running gateway does that, the next time you enable the
+   app from its dashboard.
+
+Either way, re-running the script is safe: it overwrites app files but
+preserves sync history, the original `installedAt` timestamp, and an
+already-generated `.app_secret`.
+
+**Important:** installing (through either path) does not enable the app.
+Third-party app execution is denied by default, so its backend and crons
+will not run until you also **trust** it — see Enabling below.
 
 ## Uninstalling
 
@@ -32,18 +52,30 @@ overwrites app files but preserves sync history and the original
 ./install-app.sh --uninstall
 ```
 
-Removes `~/.kiro/crew/apps/kirocrew-sync`, including its history database.
-It does **not** touch your `kirocrew-sync` checkout at
-`~/.kiro/crew/workspace/kirocrew-sync`. Safe to run even if nothing is
-installed. After uninstalling, also disable/remove the app in
-**Settings → Apps** and restart the gateway.
+If a gateway is reachable, this calls `POST /api/apps/kirocrew-sync/uninstall`
+so resources are properly deregistered and the backend is stopped before the
+files are removed. Otherwise it falls back to removing
+`~/.kiro/crew/apps/kirocrew-sync` directly (including its history database) —
+in that case, if the app was ever enabled, its registered agents/skills/crons
+are left stale until you disable it from the dashboard yourself. Either way it
+does **not** touch your `kirocrew-sync` checkout at
+`~/.kiro/crew/workspace/kirocrew-sync`, and it's safe to run even if nothing
+is installed.
 
 ## Enabling
 
-1. Restart KiroCrew gateway (if running)
-2. Go to **Settings → Apps → kirocrew-sync**
-3. Click **Enable**
-4. Navigate to **/apps/kirocrew-sync** in dashboard
+Required after every install, regardless of which install path ran, because
+third-party app execution is denied by default:
+
+1. **Settings → Security → Third-party apps** → trust `kirocrew-sync` (or
+   turn on **Allow all third-party apps**). Until this app is trusted, the
+   gateway's boot-time reconcile revokes its executable resources on every
+   restart — its backend won't run and no notifications will be delivered,
+   even if it shows as "enabled".
+2. **Apps → Sync** → click **Enable**. This is what actually registers its
+   agents/skills/crons and starts its backend (the install step above never
+   does this by itself, even through the gateway).
+3. Navigate to **/apps/kirocrew-sync** in the dashboard.
 
 ## Features
 

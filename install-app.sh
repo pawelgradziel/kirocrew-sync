@@ -7,9 +7,31 @@
 #   ./install-app.sh --uninstall  Remove the installed app
 #   ./install-app.sh --help       Show this help
 #
-# Safe to re-run: each install pass copies fresh files over the existing
-# install directory, re-initializes the (non-destructive) database schema,
-# and refreshes installation metadata without touching sync history.
+# Two install paths, tried in this order:
+#
+#   1. Gateway API (preferred). If a KiroCrew gateway is reachable on
+#      localhost, the app is installed through its real install transaction
+#      (POST /api/apps/install) — the same thing the dashboard's "Install
+#      from Path" does. This is the only path that registers agents/skills/
+#      crons and starts the app's backend, and it is the only way the app
+#      ever gets its per-app secret (.app_secret), which its backend
+#      requires to reach the KiroCrew notification API.
+#
+#   2. Offline staging (fallback). If no gateway is reachable, the script
+#      copies the app's files itself and writes a complete, schema-correct
+#      installed.json (including .app_secret) so the app is ready to be
+#      picked up the moment you Enable it from a running gateway's
+#      dashboard. It does NOT register resources or start a backend —
+#      only a live gateway can do that.
+#
+# Either way, the app is installed but NOT enabled, and third-party app
+# execution is denied by default: you still need to trust it and enable it
+# from the dashboard afterward. See app/README.md for details.
+#
+# Safe to re-run: each pass copies fresh files over the existing install
+# directory, re-initializes the (non-destructive) offline database schema,
+# and refreshes installation metadata without touching sync history or an
+# already-generated app secret.
 
 set -euo pipefail
 
@@ -19,30 +41,81 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-log_info() { echo -e "${BLUE}ℹ${NC} $*"; }
-log_success() { echo -e "${GREEN}✓${NC} $*"; }
-log_warn() { echo -e "${YELLOW}⚠${NC} $*"; }
+# All to stderr, not just log_error: several functions below (e.g.
+# mint_gateway_token) are called via command substitution — token="$(...)"
+# — to capture a return value on stdout. A log_* call that wrote to stdout
+# would get silently captured into that value instead of ever reaching the
+# terminal, swallowing exactly the diagnostic a failure needs to explain
+# itself.
+log_info() { echo -e "${BLUE}ℹ${NC} $*" >&2; }
+log_success() { echo -e "${GREEN}✓${NC} $*" >&2; }
+log_warn() { echo -e "${YELLOW}⚠${NC} $*" >&2; }
 log_error() { echo -e "${RED}✗${NC} $*" >&2; }
 
 # Paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_SRC_DIR="$SCRIPT_DIR/app"
-APP_DEST_DIR="$HOME/.kiro/crew/apps/kirocrew-sync"
-SYNC_DIR="$HOME/.kiro/crew/workspace/kirocrew-sync"
+KIROCREW_HOME="${KIROCREW_HOME:-$HOME/.kiro/crew}"
+SYNC_DIR="$KIROCREW_HOME/workspace/kirocrew-sync"
+LOCAL_SECRET_FILE="$KIROCREW_HOME/.local_secret"
+
+# Gateway HTTP location. KIROCREW_PORT mirrors the env var the gateway
+# itself honors (kiro_crew.config.loader.DASHBOARD_PORT), so a non-default
+# port setup is picked up automatically.
+GATEWAY_PORT="${KIROCREW_PORT:-5476}"
+GATEWAY_BASE="http://127.0.0.1:${GATEWAY_PORT}"
+
+# The app's own identity, read from its manifest — every installed.json
+# this script writes, and every gateway API call it makes, keys off this
+# rather than a hardcoded guess. Falls back to the literal "kirocrew-sync"
+# (this repo's fixed app name) so --help/--uninstall still work even
+# without python3 or a readable app.json; do_install's check_prerequisites
+# re-derives it strictly and aborts if it can't.
+_read_manifest_field() {
+    python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        data = json.load(f)
+    print(data.get(sys.argv[2], "") or "")
+except Exception:
+    print("")
+' "$APP_SRC_DIR/app.json" "$1" 2>/dev/null
+}
+
+APP_NAME="kirocrew-sync"
+APP_VERSION=""
+APP_DISPLAY_NAME="kirocrew-sync"
+if command -v python3 >/dev/null 2>&1 && [ -f "$APP_SRC_DIR/app.json" ]; then
+    _name="$(_read_manifest_field name)"
+    [ -n "$_name" ] && APP_NAME="$_name"
+    APP_VERSION="$(_read_manifest_field version)"
+    _display="$(_read_manifest_field displayName)"
+    [ -n "$_display" ] && APP_DISPLAY_NAME="$_display"
+fi
+APP_DEST_DIR="$KIROCREW_HOME/apps/$APP_NAME"
 
 usage() {
     cat <<EOF
 Usage: $(basename "${BASH_SOURCE[0]}") [--uninstall|--help]
 
   (no args)     Install or update the app at $APP_DEST_DIR
-  --uninstall   Remove the app directory (does not touch $SYNC_DIR)
+                Prefers a reachable KiroCrew gateway's install API; falls
+                back to staging files + metadata offline otherwise.
+  --uninstall   Remove the app (does not touch $SYNC_DIR)
   --help        Show this help
+
+Env overrides: KIROCREW_HOME (default ~/.kiro/crew), KIROCREW_PORT (default
+5476) — both match the names KiroCrew itself honors.
 EOF
 }
 
 # Verify everything the install needs is present *before* copying anything,
 # so a missing prerequisite fails loudly instead of leaving a half-installed
-# app directory behind.
+# app directory behind. Also re-derives APP_NAME/APP_VERSION/APP_DISPLAY_NAME
+# strictly, now that python3 + app.json are both confirmed present, and
+# aborts if the manifest has no usable name — nothing below this point may
+# ever write an installed.json (or call the gateway) without a real name.
 check_prerequisites() {
     local missing=0
 
@@ -75,7 +148,246 @@ check_prerequisites() {
         log_error "Prerequisite check failed, aborting before copying any files."
         exit 1
     fi
+
+    APP_NAME="$(_read_manifest_field name)"
+    if [ -z "$APP_NAME" ]; then
+        log_error "app.json has no usable \"name\" field: $APP_SRC_DIR/app.json"
+        exit 1
+    fi
+    APP_VERSION="$(_read_manifest_field version)"
+    [ -z "$APP_VERSION" ] && APP_VERSION="0.0.0"
+    APP_DISPLAY_NAME="$(_read_manifest_field displayName)"
+    [ -z "$APP_DISPLAY_NAME" ] && APP_DISPLAY_NAME="$APP_NAME"
+    APP_DEST_DIR="$KIROCREW_HOME/apps/$APP_NAME"
 }
+
+# ---------------------------------------------------------------------------
+# Gateway API helpers
+# ---------------------------------------------------------------------------
+
+gateway_reachable() {
+    command -v curl >/dev/null 2>&1 || return 1
+    # /api/health is an explicit unauthenticated liveness bypass in
+    # KiroCrew's token_auth middleware — safe to probe with no credentials.
+    curl -fsS --max-time 2 "$GATEWAY_BASE/api/health" >/dev/null 2>&1
+}
+
+# Mints a short-lived dashboard token the same way KiroCrew's own local
+# tooling does (see skills/self-nudge-loop/scaffold.sh in the kirocrew
+# source tree): GET /api/token/local from loopback with the per-install
+# secret at ~/.kiro/crew/.local_secret in an X-Local-Secret header. That
+# secret is readable only by this user, exactly like any other file under
+# $KIROCREW_HOME — reading it to talk to our own local gateway is the
+# supported bootstrap, not a credential we're inventing a use for. Prints
+# the token to stdout on success; returns 1 with a log_warn reason
+# otherwise (nothing is printed to stdout on failure).
+mint_gateway_token() {
+    if [ ! -r "$LOCAL_SECRET_FILE" ]; then
+        log_warn "Cannot read $LOCAL_SECRET_FILE — cannot authenticate to the gateway automatically."
+        return 1
+    fi
+    local secret token_json token
+    secret="$(cat "$LOCAL_SECRET_FILE")"
+    if ! token_json="$(curl -fsS --max-time 5 -H "X-Local-Secret: $secret" \
+        "$GATEWAY_BASE/api/token/local?ttl=5m" 2>/dev/null)"; then
+        log_warn "Gateway rejected the local token request."
+        return 1
+    fi
+    token="$(python3 -c '
+import json, sys
+try:
+    print(json.load(sys.stdin).get("token", ""))
+except Exception:
+    pass
+' <<<"$token_json")"
+    if [ -z "$token" ]; then
+        log_warn "Gateway did not return a token."
+        return 1
+    fi
+    printf '%s' "$token"
+}
+
+_json_source_body() {
+    python3 -c 'import json,sys; print(json.dumps({"source": sys.argv[1]}))' "$APP_SRC_DIR"
+}
+
+# Installs (or, if already installed, updates) the app through the real
+# gateway install transaction. Returns 0 on success.
+install_via_gateway() {
+    local token resp http_status http_body error
+
+    token="$(mint_gateway_token)" || return 1
+    [ -z "$token" ] && return 1
+
+    resp="$(curl -sS --max-time 60 -w '\n%{http_code}' -X POST \
+        -H 'Content-Type: application/json' \
+        -d "$(_json_source_body)" \
+        "$GATEWAY_BASE/api/apps/install?token=$token")"
+    http_status="${resp##*$'\n'}"
+    http_body="${resp%$'\n'*}"
+
+    if [ "$http_status" = "201" ]; then
+        log_success "Installed via the KiroCrew gateway (POST /api/apps/install)"
+        return 0
+    fi
+
+    error="$(python3 -c '
+import json, sys
+try:
+    print(json.load(sys.stdin).get("error", ""))
+except Exception:
+    print("")
+' <<<"$http_body" 2>/dev/null || true)"
+
+    if printf '%s' "$error" | grep -qi "already installed"; then
+        log_info "Already installed via the gateway — updating in place (POST /api/apps/$APP_NAME/update)"
+        resp="$(curl -sS --max-time 60 -w '\n%{http_code}' -X POST \
+            -H 'Content-Type: application/json' \
+            -d "$(_json_source_body)" \
+            "$GATEWAY_BASE/api/apps/$APP_NAME/update?token=$token")"
+        http_status="${resp##*$'\n'}"
+        http_body="${resp%$'\n'*}"
+        if [ "$http_status" = "200" ]; then
+            log_success "Updated via the KiroCrew gateway (POST /api/apps/$APP_NAME/update)"
+            return 0
+        fi
+        log_warn "Gateway update failed (HTTP $http_status): $(printf '%s' "$http_body" | head -c 300)"
+        return 1
+    fi
+
+    log_warn "Gateway install failed (HTTP $http_status): ${error:-$(printf '%s' "$http_body" | head -c 300)}"
+    return 1
+}
+
+print_manual_install_instructions() {
+    echo
+    log_info "To install manually instead:"
+    echo "  1. Open the KiroCrew dashboard → Apps"
+    echo "  2. Click the sources icon (top-right of the Apps page — \"Manage app sources\")"
+    echo "  3. Under \"Install from Path\", enter:"
+    echo "       $APP_SRC_DIR"
+    echo "  4. Click Install"
+}
+
+print_trust_and_enable_steps() {
+    echo "Next steps (required before it does anything):"
+    echo "  1. Settings → Security → Third-party apps → trust \"$APP_NAME\""
+    echo "     (or turn on \"Allow all third-party apps\") — third-party app"
+    echo "     execution is denied by default, gateway or not."
+    echo "  2. Apps → $APP_DISPLAY_NAME → Enable"
+    echo "     (this is what registers its agents/skills/crons and starts its backend)"
+    echo "  3. Navigate to /apps/$APP_NAME in the dashboard"
+}
+
+# ---------------------------------------------------------------------------
+# Offline fallback: stage files + write correct installed.json ourselves
+# ---------------------------------------------------------------------------
+
+do_offline_install() {
+    log_info "Creating app directory..."
+    mkdir -p "$APP_DEST_DIR"/{backend,data,ui}
+
+    log_info "Copying app files..."
+    cp "$APP_SRC_DIR/app.json" "$APP_DEST_DIR/"
+    cp -r "$APP_SRC_DIR/backend"/. "$APP_DEST_DIR/backend/"
+    cp -r "$APP_SRC_DIR/ui"/. "$APP_DEST_DIR/ui/"
+    if [ -f "$APP_SRC_DIR/requirements.txt" ]; then
+        cp "$APP_SRC_DIR/requirements.txt" "$APP_DEST_DIR/"
+    fi
+    find "$APP_DEST_DIR/backend" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+    log_success "App files copied"
+
+    # The backend's own managers call Database.initialize() on construction
+    # (CREATE TABLE IF NOT EXISTS ...), so this only pre-creates the schema
+    # for inspection before the app is ever enabled; it's not required for
+    # correctness and is always safe to re-run.
+    log_info "Initializing database..."
+    python3 "$APP_DEST_DIR/backend/database.py"
+
+    log_info "Recording installation metadata..."
+    local now installed_at existing
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    installed_at="$now"
+    if [ -f "$APP_DEST_DIR/installed.json" ]; then
+        existing="$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        print(json.load(f).get("installedAt", ""))
+except Exception:
+    print("")
+' "$APP_DEST_DIR/installed.json" 2>/dev/null || true)"
+        [ -n "$existing" ] && installed_at="$existing"
+    fi
+
+    # Schema per kiro_crew.apps.manager.InstalledApp (installed.json's
+    # authoritative field list). "name" is the fix this whole rework exists
+    # for: KiroCrew's boot-time resource reconcile keys trust and admission
+    # off this field, and a missing/empty name is read back as "" — which
+    # can never appear in agent.apps_trusted, so the app's resources get
+    # silently revoked as an untrusted, unnamed app. origin="local" matches
+    # the field's own documented meaning ("installed from a local directory
+    # path"); resources/lifecycle="gateway" so the dashboard's own
+    # Enable/Update/Uninstall controls manage it exactly like a real
+    # gateway-driven install; schemaVersion=2 is current. enabled is always
+    # false here — matching the gateway's own install_app(), which never
+    # auto-enables — so nothing runs until you explicitly trust + enable it.
+    python3 - "$APP_DEST_DIR/installed.json" "$APP_NAME" "$APP_VERSION" \
+        "$APP_DISPLAY_NAME" "$installed_at" "$now" "$APP_SRC_DIR" <<'PYEOF'
+import json, sys
+
+path, name, version, display_name, installed_at, updated_at, source = sys.argv[1:8]
+meta = {
+    "name": name,
+    "version": version,
+    "displayName": display_name,
+    "enabled": False,
+    "installedAt": installed_at,
+    "updatedAt": updated_at,
+    "source": source,
+    "origin": "local",
+    "resources": "gateway",
+    "lifecycle": "gateway",
+    "schemaVersion": 2,
+    "dev": False,
+}
+with open(path, "w") as f:
+    json.dump(meta, f, indent=2)
+    f.write("\n")
+PYEOF
+    log_success "Installation metadata recorded (name=$APP_NAME)"
+
+    # The gateway's install transaction always generates .app_secret
+    # alongside installed.json (kiro_crew.apps.manager.install_app) — it's
+    # a plain local file write (os.urandom(32).hex(), mode 0600), not
+    # anything that needs the gateway itself, so we can do it here too.
+    # Without it the app's backend has no KIROCREW_PROXY_SECRET to
+    # authenticate with, and the gateway proxy 502s every request to it —
+    # including the notification API calls app/backend/notifications.py
+    # needs for its whole reason for existing.
+    log_info "Writing app secret..."
+    local secret_file="$APP_DEST_DIR/.app_secret"
+    if [ ! -f "$secret_file" ]; then
+        (umask 077 && python3 -c 'import os; print(os.urandom(32).hex())' > "$secret_file")
+        log_success "App secret generated"
+    else
+        log_info "App secret already present — left untouched"
+    fi
+
+    echo
+    log_success "KiroCrew Sync app staged at $APP_DEST_DIR"
+    echo
+    echo "This offline install wrote correct app files, installed.json, and"
+    echo ".app_secret — matching what the gateway's own installer produces —"
+    echo "but it could NOT register agents/skills/crons or start the backend;"
+    echo "only a running gateway can do that."
+    echo
+    print_trust_and_enable_steps
+}
+
+# ---------------------------------------------------------------------------
+# Install / uninstall entry points
+# ---------------------------------------------------------------------------
 
 do_install() {
     log_info "Installing KiroCrew Sync app..."
@@ -83,82 +395,66 @@ do_install() {
 
     check_prerequisites
 
-    # Create app directory structure. cp -r below will create any deeper
-    # subdirectories (ui/components, ui/assets, ...) as needed.
-    log_info "Creating app directory..."
-    mkdir -p "$APP_DEST_DIR"/{backend,data,ui}
-
-    # Copy files. Whole directories are copied (not individual filenames) so
-    # new backend modules or UI assets are never silently left behind.
-    log_info "Copying app files..."
-    cp "$APP_SRC_DIR/app.json" "$APP_DEST_DIR/"
-    cp -r "$APP_SRC_DIR/backend"/. "$APP_DEST_DIR/backend/"
-    cp -r "$APP_SRC_DIR/ui"/. "$APP_DEST_DIR/ui/"
-
-    if [ -f "$APP_SRC_DIR/requirements.txt" ]; then
-        cp "$APP_SRC_DIR/requirements.txt" "$APP_DEST_DIR/"
+    if ! command -v curl >/dev/null 2>&1; then
+        log_warn "curl not found — cannot use the gateway API."
+        echo
+        do_offline_install
+        return
     fi
 
-    # Drop any Python bytecode cache that tagged along from the source
-    # checkout; it is regenerated automatically and should not ship.
-    find "$APP_DEST_DIR/backend" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-
-    log_success "App files copied"
-
-    # Initialize database. database.py uses CREATE TABLE IF NOT EXISTS /
-    # INSERT OR IGNORE, so re-running this on an existing install is safe
-    # and never wipes sync history.
-    log_info "Initializing database..."
-    python3 "$APP_DEST_DIR/backend/database.py"
-
-    # Create/refresh installation metadata. Preserve the original
-    # installedAt across re-runs and record the latest update separately.
-    log_info "Recording installation metadata..."
-    local now installed_at existing
-    now="$(date -Iseconds)"
-    installed_at="$now"
-    existing=""
-    if [ -f "$APP_DEST_DIR/installed.json" ]; then
-        existing="$(python3 -c "
-import json
-try:
-    with open('$APP_DEST_DIR/installed.json') as f:
-        print(json.load(f).get('installedAt', ''))
-except Exception:
-    print('')
-" 2>/dev/null || true)"
-        if [ -n "$existing" ]; then
-            installed_at="$existing"
+    if gateway_reachable; then
+        log_info "KiroCrew gateway detected at $GATEWAY_BASE"
+        if install_via_gateway; then
+            echo
+            log_success "KiroCrew Sync app installed."
+            echo
+            print_trust_and_enable_steps
+            return
         fi
+        echo
+        log_warn "Automatic install via the gateway did not complete."
+        print_manual_install_instructions
+        exit 1
     fi
 
-    cat > "$APP_DEST_DIR/installed.json" << EOF
-{
-  "installedAt": "$installed_at",
-  "updatedAt": "$now",
-  "version": "1.0.0",
-  "source": "local"
-}
-EOF
-
-    log_success "Installation metadata recorded"
-
+    log_warn "KiroCrew gateway not reachable at $GATEWAY_BASE — falling back to an offline install."
+    log_warn "An offline install stages files and metadata correctly but cannot register"
+    log_warn "resources or start the backend; that only happens once you Enable the app"
+    log_warn "from a running gateway's dashboard."
     echo
-    log_success "KiroCrew Sync app installed at $APP_DEST_DIR"
-    echo
-    echo "Next steps:"
-    echo "  1. Restart KiroCrew gateway (if running)"
-    echo "  2. Go to Settings → Apps → kirocrew-sync"
-    echo "  3. Enable the app"
-    echo "  4. Navigate to /apps/kirocrew-sync in dashboard"
-    echo
-    log_info "After enabling, the sync daemon will start automatically"
+    do_offline_install
 }
 
 do_uninstall() {
     if [ ! -d "$APP_DEST_DIR" ]; then
         log_warn "Nothing to do: $APP_DEST_DIR does not exist"
         exit 0
+    fi
+
+    if gateway_reachable; then
+        log_info "KiroCrew gateway detected — uninstalling via POST /api/apps/$APP_NAME/uninstall"
+        local token resp http_status http_body
+        if token="$(mint_gateway_token)" && [ -n "$token" ]; then
+            resp="$(curl -sS --max-time 60 -w '\n%{http_code}' -X POST \
+                -H 'Content-Type: application/json' \
+                -d '{"purge_data": true}' \
+                "$GATEWAY_BASE/api/apps/$APP_NAME/uninstall?token=$token")"
+            http_status="${resp##*$'\n'}"
+            http_body="${resp%$'\n'*}"
+            if [ "$http_status" = "200" ]; then
+                log_success "Uninstalled via the gateway (resources deregistered, backend stopped)"
+                echo
+                log_info "This did not touch $SYNC_DIR."
+                return 0
+            fi
+            log_warn "Gateway uninstall failed (HTTP $http_status): $(printf '%s' "$http_body" | head -c 300)"
+            log_warn "Falling back to removing the app directory directly."
+        else
+            log_warn "Could not authenticate to the gateway automatically."
+            log_warn "If the app is currently enabled, its registered agents/skills/crons and"
+            log_warn "backend will be left stale until you disable it from the dashboard — removing"
+            log_warn "files directly does not deregister anything."
+        fi
     fi
 
     log_info "Removing KiroCrew Sync app from $APP_DEST_DIR..."
