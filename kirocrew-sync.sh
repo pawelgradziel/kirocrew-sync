@@ -115,6 +115,9 @@ source "$SCRIPT_DIR/lib/daemon.sh"
 STRATEGY="auto"
 DRY_RUN=false
 FORCE=false
+EXPORT_OUTPUT=""
+IMPORT_ARCHIVE=""
+IMPORT_MODE=""
 
 PYTHON_BIN="${KIROCREW_SYNC_PYTHON:-python3}"
 
@@ -606,8 +609,73 @@ apply_to_kirocrew() {
     touch "$PACK_MARKER" 2>/dev/null || true
 }
 
+# bundle_name() is <machine-id>.bundle -- no scope component. Changing that
+# would be a wire-format break (every existing deployment's bundles are named
+# this way; see ADR 0002's wire-format caveat), so instead this is a guard: if
+# the SAME machine has already published a bundle under a DIFFERENT scope at
+# this same backend location, publishing here would silently overwrite it --
+# whichever scope publishes second wins the filename, and the other scope's
+# state is simply gone from the remote, even though it is untouched locally.
+#
+# fetch_bundles() skips this machine's own bundle on purpose (there is
+# nothing to merge from yourself), so the ordinary per-remote-machine compat
+# check in check_remote_compat() never looks at it -- that function is what
+# owns "read .kcsync-scope out of a fetched ref" (git show <ref>:.kcsync-scope
+# | tr -d whitespace, legacy/absent meaning personal), and this reuses that
+# exact mechanism pointed at our own bundle rather than inventing a second way
+# to read the same file.
+check_own_scope_collision() {
+    local temp_dir="$1"
+    local own_bundle="$temp_dir/bundles/$(bundle_name)"
+    [ -f "$own_bundle" ] || return 0
+
+    # A private ref namespace, deliberately NOT refs/remotes/* -- that is what
+    # merge_remote_refs() scans for machines to merge, and this is not one: it
+    # is our own previously-published bundle, fetched only to read one file
+    # out of its tree. Keeping it out of refs/remotes/ means a ref this
+    # function fails to clean up (a crash between fetch and delete, say) is
+    # simply invisible to every other function here, rather than being merged
+    # on the next sync as a phantom machine named after this scratch ref.
+    local scratch_ref="refs/kcsync-self/$SYNC_BRANCH"
+    git_repo update-ref -d "$scratch_ref" > /dev/null 2>&1 || true
+
+    if ! git_repo bundle verify "$own_bundle" > /dev/null 2>&1; then
+        return 0   # unreadable; not this guard's problem to diagnose
+    fi
+    # Force-fetch (leading +): this ref never has real history of its own to
+    # fast-forward from, only whatever a previous, possibly-interrupted run of
+    # this same check left behind.
+    if ! git_repo fetch -q "$own_bundle" \
+        "+refs/heads/$SYNC_BRANCH:$scratch_ref" 2>/dev/null; then
+        return 0
+    fi
+
+    local remote_scope
+    remote_scope="$(git_repo show "$scratch_ref:.kcsync-scope" 2>/dev/null \
+        | tr -d '[:space:]')"
+    git_repo update-ref -d "$scratch_ref" > /dev/null 2>&1 || true
+    # Legacy bundles predate the scope marker; absent means personal -- same
+    # fallback check_remote_compat() uses for every other machine's bundle.
+    [ -n "$remote_scope" ] || remote_scope="personal"
+
+    if [ "$remote_scope" != "$SYNC_SCOPE" ]; then
+        log_error "Remote already holds a bundle for this machine ($(get_machine_id))"
+        log_error "published at scope '$remote_scope'; this run is scope '$SYNC_SCOPE'."
+        log_info ""
+        log_info "Bundle filenames carry no scope, so publishing now would overwrite that"
+        log_info "machine's '$remote_scope' bundle with this '$SYNC_SCOPE' one and corrupt"
+        log_info "both. Give each scope its own backend location -- a different S3_PREFIX,"
+        log_info "LOCAL_SYNC_DIR, or remote directory -- through a separate config file"
+        log_info "selected with KIROCREW_SYNC_CONFIG, e.g.:"
+        log_info "  KIROCREW_SYNC_CONFIG=~/.kiro/crew/team-config.sh $0 sync --team"
+        return 1
+    fi
+    return 0
+}
+
 publish_bundle() {
     local temp_dir="$1"
+    check_own_scope_collision "$temp_dir" || exit 1
     mkdir -p "$temp_dir/bundles"
     git_repo bundle create "$temp_dir/bundles/$(bundle_name)" "$SYNC_BRANCH" \
         > /dev/null 2>&1
@@ -754,6 +822,184 @@ cmd_pull() {
     cmd_sync
 }
 
+# --------------------------------------------------------------------------
+# export / import -- the seeding primitive named as a follow-up in ADR 0002
+# ("Snapshot + restore as a KiroCrew subcommand"). export packages the
+# current scope's synced state as one file; import seeds a machine from one.
+#
+# Deliberately NOT a merge. A merge needs two live states *and* their common
+# ancestor; an archive is a single snapshot with no ancestor against this
+# machine's own state, so there is nothing for "merge" to mean here -- see
+# the ADR's "Snapshot + restore" section for the full argument. That is what
+# `sync` is for, once both machines share real history. import only ever
+# replaces: either there is nothing local yet to conflict with, or --force
+# says to discard what is.
+# --------------------------------------------------------------------------
+
+cmd_export() {
+    if [ -z "$EXPORT_OUTPUT" ]; then
+        log_error "export requires -o/--output <path>"
+        log_info "Example: $0 export -o snap.tar.gz"
+        exit 1
+    fi
+
+    acquire_sync_lock
+    require_python
+    require_git
+    ensure_repo
+
+    log_info "Unpacking local state..."
+    kcsync_scoped unpack --kirocrew-dir "$KIROCREW_DIR" --repo "$SYNC_REPO"
+    if commit_local_state "export: local state from $(get_machine_id)"; then
+        log_success "Recorded local changes"
+    else
+        log_info "No local changes since last sync"
+    fi
+
+    if ! repo_has_commit; then
+        log_error "Nothing to export yet."
+        exit 1
+    fi
+
+    make_temp_dir
+    local build="$TEMP_DIR/build"
+    mkdir -p "$build"
+
+    log_info "Bundling sync history..."
+    # A full bundle of one ref with no negative boundary carries the whole
+    # reachable history, not just its tip -- that ancestry is the point: an
+    # imported machine gets a real merge base and joins the existing pair
+    # cleanly on its next ordinary sync, which a bare state tarball cannot
+    # offer (see ADR 0002's "Snapshot + restore" section). blob/ needs no
+    # separate handling to make that true: it is a normal tracked directory
+    # under $SYNC_REPO (ensure_repo's .gitattributes marks it `binary`, not
+    # "untracked"), so every embedding it holds travels inside this same
+    # bundle exactly like db/ and files/ do -- packaging it a second time
+    # would only duplicate bytes already inside the bundle's packed objects.
+    git_repo bundle create "$build/repo.bundle" "$SYNC_BRANCH" > /dev/null 2>&1
+
+    log_info "Writing manifest..."
+    # Secrets: this archive is the unpack output plus a bundle of it, and
+    # unpack_files() already strips every credential-shaped JSON leaf
+    # (files.py's SECRET_KEY_RE) before anything is written into $SYNC_REPO --
+    # the same redaction `sync`/`push` rely on before publishing a bundle to
+    # the backend. There is nothing export-specific to strip; tests/test_seed.sh
+    # asserts the archive this produces does not contain a known secret value.
+    kcsync_scoped seed-manifest --kirocrew-dir "$KIROCREW_DIR" \
+        --machine-id "$(get_machine_id)" > "$build/manifest.json"
+
+    tar -C "$build" -czf "$TEMP_DIR/seed.tar.gz" manifest.json repo.bundle
+    mkdir -p "$(dirname "$EXPORT_OUTPUT")"
+    mv "$TEMP_DIR/seed.tar.gz" "$EXPORT_OUTPUT"
+
+    log_success "Exported to $EXPORT_OUTPUT"
+    log_info "Scope: $SYNC_SCOPE   Machine: $(get_machine_id)"
+}
+
+cmd_import() {
+    if [ -z "$IMPORT_ARCHIVE" ]; then
+        log_error "import requires an archive path"
+        log_info "Example: $0 import snap.tar.gz"
+        exit 1
+    fi
+    if [ ! -f "$IMPORT_ARCHIVE" ]; then
+        log_error "Archive not found: $IMPORT_ARCHIVE"
+        exit 1
+    fi
+
+    acquire_sync_lock
+    require_python
+    require_git
+
+    make_temp_dir
+    local extract="$TEMP_DIR/extract"
+    mkdir -p "$extract"
+    if ! tar -xzf "$IMPORT_ARCHIVE" -C "$extract" 2>/dev/null; then
+        log_error "Could not read archive: $IMPORT_ARCHIVE"
+        exit 1
+    fi
+    if [ ! -f "$extract/manifest.json" ] || [ ! -f "$extract/repo.bundle" ]; then
+        log_error "Not a kirocrew-sync seed archive (expected manifest.json and repo.bundle)"
+        exit 1
+    fi
+
+    log_info "Checking archive against local state..."
+    # Scope and embedding-space mismatches are refused outright, with no
+    # --force override -- unlike sync's per-machine quarantine, where
+    # skipping one incompatible machine is harmless because every other
+    # machine still merges, import has exactly one input. Forcing past a
+    # wrong scope or a foreign embedding model would seed this machine's
+    # only copy of the data with it.
+    if ! kcsync_scoped seed-check --kirocrew-dir "$KIROCREW_DIR" \
+            --manifest "$extract/manifest.json"; then
+        log_error "Refusing to import."
+        exit 1
+    fi
+    log_success "Archive matches this machine's scope and embedding space"
+
+    local existing=false
+    local summary=""
+    if [ -d "$SYNC_REPO/.git" ] && repo_has_commit; then
+        existing=true
+    fi
+    if summary="$(kcsync_scoped seed-has-data --kirocrew-dir "$KIROCREW_DIR" 2>/dev/null)"; then
+        existing=true
+    fi
+
+    if $existing && ! $FORCE; then
+        log_error "This machine already has local state for scope '$SYNC_SCOPE'."
+        echo
+        [ -d "$SYNC_REPO/.git" ] && log_info "  Sync repo: $SYNC_REPO"
+        [ -n "$summary" ] && echo "$summary"
+        echo
+        log_info "--force will:"
+        log_info "  - discard this scope's local sync history ($SYNC_REPO) and replace it"
+        log_info "    with the archive's -- import seeds, it does not merge (there is no"
+        log_info "    common ancestor to merge against here; that is what 'sync' is for)"
+        log_info "  - make every synced database table match the archive exactly: rows"
+        log_info "    that only exist on this machine are DELETED, rows in the archive"
+        log_info "    are inserted or overwrite the local ones"
+        log_info "  - overwrite every synced file with the archive's copy, except"
+        log_info "    credential-shaped JSON fields, which are kept from this machine"
+        log_info "    (re-grafted, exactly like every other pack)"
+        log_info "  - back up both databases first, exactly like any other pack"
+        echo
+        log_info "Re-run with --force to proceed."
+        exit 1
+    fi
+
+    log_info "Materializing sync repo from the archive..."
+    rm -rf "$SYNC_REPO"
+    # A bare `git init`, not ensure_repo() -- ensure_repo() also writes
+    # .gitattributes straight into the working tree, untracked, and the
+    # checkout below would then refuse: git will not clobber an untracked
+    # file that the ref being checked out also carries. Run ensure_repo()
+    # afterwards instead, once the checkout has populated the tree; being
+    # idempotent, it configures merge drivers and refreshes .gitattributes
+    # to this script's own version, exactly as it does for every other repo
+    # it opens, checked-out-from-a-bundle or not.
+    git init -q -b "$SYNC_BRANCH" "$SYNC_REPO"
+    git_repo fetch -q "$extract/repo.bundle" \
+        "refs/heads/$SYNC_BRANCH:refs/remotes/seed-import/$SYNC_BRANCH"
+    git_repo checkout -q -B "$SYNC_BRANCH" "refs/remotes/seed-import/$SYNC_BRANCH"
+    git_repo update-ref -d "refs/remotes/seed-import/$SYNC_BRANCH" > /dev/null 2>&1 || true
+    ensure_repo
+
+    apply_to_kirocrew
+    log_success "Seeded local KiroCrew state from $IMPORT_ARCHIVE"
+
+    if $DRY_RUN; then
+        log_success "Dry run complete. Nothing was published."
+        return 0
+    fi
+
+    make_temp_dir
+    backend_pull "$TEMP_DIR" 2>/dev/null || true
+    publish_bundle "$TEMP_DIR"
+    log_success "Import complete"
+    log_info "Run '$0 sync' from now on to merge further changes with the rest of the pair."
+}
+
 cmd_status() {
     require_python
     log_info "Machine ID: $(get_machine_id)"
@@ -886,6 +1132,8 @@ Commands:
   push        Publish local state without merging
   pull        Sync, preferring remote changes on conflict
   resume      Finish a sync that stopped on conflicts
+  export      Archive this scope's synced state, to seed another machine
+  import      Seed this machine's local state from an export archive
   daemon      Run background sync (polls for changes, auto-syncs)
   status      Show pending changes and backend state
   doctor      Inspect local data and run preflight checks
@@ -902,9 +1150,12 @@ Options:
                    episodic memory and per-person config. Off by default.
                    Equivalent to --scope team, or SYNC_SCOPE=team in config.
   --force          Merge quarantined machines and pack even if a preflight
-                   gate fails. Applies to every machine at once, so it is
-                   not the way to work around a single lagging machine --
-                   sync already skips those and carries on.
+                   gate fails (sync/pull/resume, applies to every machine at
+                   once -- not the way to work around a single lagging
+                   machine, which sync already skips and carries on). For
+                   import, skip the existing-local-state check and replace
+                   it with the archive.
+  -o, --output <path>   export: where to write the archive (required)
 
 Exit codes:
   0   Success
@@ -925,6 +1176,9 @@ Examples:
   $0 sync --strategy local-wins
   $0 sync --team
   SYNC_BACKEND=s3 $0 sync
+  $0 export -o snap.tar.gz
+  $0 import snap.tar.gz
+  $0 import snap.tar.gz --force
 
 Conflicts are resolved per row, not per file. "auto" keeps the most
 recently updated version of each row and never drops an edit in favour
@@ -938,6 +1192,15 @@ and a team machine can never merge into each other by accident.
 
 Each scope keeps its own sync repo and merge base, so the same machine can
 sync personally with one config and with a team using another.
+
+export/import seed a new machine from an existing one's state -- a real git
+history, not just a snapshot, so the seeded machine gets an actual merge
+base and joins future syncs cleanly instead of starting from nothing. There
+is no merge mode for import: a merge needs two live states *and* their
+common ancestor, and a standalone archive has no ancestor against this
+machine's own data -- that is exactly what "sync" provides once both
+machines share real history. import only ever replaces, and only with
+--force when there is something local it would replace.
 EOF
 }
 
@@ -955,8 +1218,26 @@ while [ $# -gt 0 ]; do
         --team)     SYNC_SCOPE="team"; scope_paths; shift ;;
         --scope)    SYNC_SCOPE="${2:-personal}"; scope_paths; shift 2 ;;
         --scope=*)  SYNC_SCOPE="${1#*=}"; scope_paths; shift ;;
-        *)
+        -o|--output)
+            EXPORT_OUTPUT="${2:-}"; shift 2 ;;
+        --output=*)
+            EXPORT_OUTPUT="${1#*=}"; shift ;;
+        --mode)
+            IMPORT_MODE="${2:-}"; shift 2 ;;
+        --mode=*)
+            IMPORT_MODE="${1#*=}"; shift ;;
+        -*)
             log_error "Unknown option: $1"; show_help; exit 1 ;;
+        *)
+            # The one positional argument this script accepts at all: the
+            # archive path for `import`. Everything else stays flag-only, so
+            # a stray bare word anywhere else still errors exactly as before.
+            if [ "$COMMAND" = "import" ] && [ -z "$IMPORT_ARCHIVE" ]; then
+                IMPORT_ARCHIVE="$1"; shift
+            else
+                log_error "Unknown option: $1"; show_help; exit 1
+            fi
+            ;;
     esac
 done
 
@@ -974,12 +1255,37 @@ case "$SYNC_SCOPE" in
        exit 1 ;;
 esac
 
+# There is deliberately no merge mode for import (see ADR 0002's "Snapshot +
+# restore as a KiroCrew subcommand"): a merge needs two live states and their
+# common ancestor, and a standalone archive has none against this machine's
+# own data. "replace" is the only real mode and is also the default, so it is
+# accepted as a no-op rather than required; anything merge-shaped gets this
+# pointer instead of a generic error, and anything else is just rejected.
+if [ -n "$IMPORT_MODE" ] && [ "$IMPORT_MODE" != "replace" ]; then
+    case "$(echo "$IMPORT_MODE" | tr '[:upper:]' '[:lower:]')" in
+        *merge*)
+            log_error "There is no 'merge' mode for import."
+            log_info "A merge needs two live states and their common ancestor; a"
+            log_info "standalone archive has no ancestor against this machine's own"
+            log_info "data, so there is nothing for 'merge' to mean here. That is"
+            log_info "what 'sync' does, with a real base -- see"
+            log_info "docs/adr/0002-three-way-sync-via-unpacked-git-repo.md"
+            ;;
+        *)
+            log_error "Unknown import mode: $IMPORT_MODE (only 'replace' exists, and it is the default)"
+            ;;
+    esac
+    exit 1
+fi
+
 case "$COMMAND" in
     init)    cmd_init ;;
     sync)    cmd_sync ;;
     push)    cmd_push ;;
     pull)    cmd_pull ;;
     resume)  cmd_resume ;;
+    export)  cmd_export ;;
+    import)  cmd_import ;;
     daemon)  cmd_daemon ;;
     status)  cmd_status ;;
     doctor)  cmd_doctor ;;

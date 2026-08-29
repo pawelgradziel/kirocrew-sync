@@ -165,6 +165,40 @@ def cmd_create(args):
     return 0
 
 
+def cmd_create_empty(args):
+    """A freshly-installed KiroCrew: real schema, zero content rows.
+
+    Distinct from `create`, which seeds baseline shared rows so later syncs
+    have a real merge base for merge testing. This simulates what `import`'s
+    existing-state gate is actually deciding between: KiroCrew has been
+    installed and run once, so its databases exist with the current schema,
+    but nothing has been added to it yet -- there is nothing here an import
+    would discard.
+    """
+    root = Path(args.dir)
+    (root / "workspace" / "knowledge").mkdir(parents=True, exist_ok=True)
+    (root / "sessions").mkdir(parents=True, exist_ok=True)
+
+    mem = connect(root / "memory.db")
+    mem.executescript(MEMORY_SCHEMA)
+    mem.execute("INSERT INTO schema_version VALUES (3, ?)", [T0])
+    if args.embedding_sig:
+        mem.execute("INSERT INTO memory_meta VALUES ('embedding_space_sig', ?, ?)",
+                    [args.embedding_sig, T0])
+    mem.commit()
+    mem.execute("PRAGMA journal_mode=WAL")
+    mem.close()
+
+    kn = connect(root / "workspace" / "knowledge" / "knowledge.db")
+    kn.executescript(KNOWLEDGE_SCHEMA)
+    kn.commit()
+    kn.execute("PRAGMA journal_mode=WAL")
+    kn.close()
+
+    print("created empty %s" % root)
+    return 0
+
+
 def cmd_set_lesson(args):
     conn = connect(Path(args.dir) / "memory.db")
     conn.execute(
@@ -298,6 +332,12 @@ def main():
     p.add_argument("--name", default="a")
     p.add_argument("--embedding-sig", default="sig-shared")
     p.set_defaults(func=cmd_create)
+
+    p = sub.add_parser("create-empty")
+    p.add_argument("dir")
+    p.add_argument("--name", default="a")
+    p.add_argument("--embedding-sig", default="")
+    p.set_defaults(func=cmd_create_empty)
 
     p = sub.add_parser("set-lesson")
     p.add_argument("dir"); p.add_argument("key"); p.add_argument("rule")

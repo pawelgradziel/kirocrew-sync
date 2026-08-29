@@ -283,6 +283,102 @@ def cmd_paths(args):
     return pp.report(db, mappings)
 
 
+def cmd_seed_manifest(args):
+    """Build the manifest that travels inside an export archive.
+
+    Printed to stdout as the only output (diagnostics, if any, go through
+    _log() to stderr as usual) so the caller in kirocrew-sync.sh can redirect
+    it straight into the archive's manifest.json.
+    """
+    manifest = {
+        "scope": args.scope,
+        "machine_id": args.machine_id,
+        "format_version": FORMAT_VERSION,
+        "embedding_space_sig": gates.local_embedding_sig(args.kirocrew_dir),
+        "exported_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    print(json.dumps(manifest, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_seed_check(args):
+    """Validate an import archive's manifest against local state.
+
+    Runs before anything is materialized -- there is no repo or ref to run
+    the ordinary compat gate against yet, so this compares the manifest's
+    flat fields directly rather than reading a fetched tree. Same two
+    properties as sync's pre-merge gates (check_scope, check_embedding_space)
+    and the same rationale: scope decides what a machine is allowed to hold,
+    and mixed embedding spaces degrade search silently.
+    """
+    log = _log()
+    try:
+        manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        log("  ERROR: unreadable manifest: %s" % exc)
+        return 2
+
+    findings = list(gates.check_scope(
+        args.scope, manifest.get("scope", pol.PERSONAL), "the archive"))
+
+    remote_sig = manifest.get("embedding_space_sig")
+    local_sig = gates.local_embedding_sig(args.kirocrew_dir)
+    if local_sig and remote_sig and local_sig != remote_sig:
+        findings.append((gates.ERROR,
+            "embedding space mismatch (local %s, archive %s); importing "
+            "would mix incompatible vectors"
+            % (local_sig[:12], remote_sig[:12])))
+
+    for level, message in findings:
+        log("  %s: %s" % ("ERROR" if level == gates.ERROR else "WARN", message))
+    if not findings:
+        log("  ok: scope and embedding space match")
+    return 2 if any(level == gates.ERROR for level, _ in findings) else 0
+
+
+
+# Structural/identity rows, not accumulated content: schema_version and
+# memory_meta record the schema version and the embedding model, not
+# anything a person added, and both are themselves synced tables (the
+# compat gates depend on comparing them). Every machine that has ever run
+# KiroCrew has them populated, so counting them here would make the
+# fresh-machine branch of import's existing-state gate unreachable on any
+# machine with a real install -- the exact case the gate exists to let
+# through without --force.
+_BOOKKEEPING_TABLES = frozenset(["schema_version", "memory_meta"])
+
+
+def cmd_seed_has_data(args):
+    """Predicate for import's existing-state gate.
+
+    Exit 0 (and print a short summary of what was found) if this scope
+    already has synced database rows or allowlisted files that --force would
+    discard; exit 1 if there is nothing here yet, meaning a fresh machine is
+    safe to seed without --force.
+    """
+    kirocrew_dir = Path(args.kirocrew_dir)
+    found = False
+    for db_name, rel in pol.DATABASES.items():
+        db_path = kirocrew_dir / rel
+        if not db_path.exists():
+            continue
+        counts = dbio.exported_row_counts(db_path, db_name, args.scope)
+        counts = {name: n for name, n in counts.items()
+                  if name not in _BOOKKEEPING_TABLES}
+        total = sum(counts.values())
+        if total:
+            found = True
+            tables_with_rows = sum(1 for c in counts.values() if c)
+            print("  %s: %d synced row(s) across %d table(s)"
+                  % (rel, total, tables_with_rows))
+    syncable, _veto, _big = files.scan_tree(kirocrew_dir, args.scope)
+    if syncable:
+        found = True
+        print("  %d synced file(s) (config.json, sessions, artifacts, ...)"
+              % len(syncable))
+    return 0 if found else 1
+
+
 def _timestamp():
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
@@ -350,6 +446,24 @@ def build_parser():
         "paths", help="check knowledge source path portability"),
                     need_repo=False)
     p.set_defaults(func=cmd_paths)
+
+    p = with_common(sub.add_parser(
+        "seed-manifest", help="build the manifest for an export archive"),
+                    need_repo=False)
+    p.add_argument("--machine-id", required=True)
+    p.set_defaults(func=cmd_seed_manifest)
+
+    p = with_common(sub.add_parser(
+        "seed-check", help="validate an import archive's manifest against local state"),
+                    need_repo=False)
+    p.add_argument("--manifest", required=True)
+    p.set_defaults(func=cmd_seed_check)
+
+    p = with_common(sub.add_parser(
+        "seed-has-data",
+        help="exit 0 if this scope already has synced state (import's existing-state gate)"),
+                    need_repo=False)
+    p.set_defaults(func=cmd_seed_has_data)
 
     return parser
 

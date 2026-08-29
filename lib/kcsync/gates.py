@@ -79,6 +79,28 @@ def _repo_memory_meta(repo_dir):
         return {}
 
 
+def local_embedding_sig(kirocrew_dir):
+    """This machine's embedding_space_sig, read one way for every caller that
+    needs to compare it: the pre-merge gate below, and the export/import seed
+    primitive in cli.py, which checks it against a manifest before anything
+    is materialized. One place that knows memory_meta's key/value shape.
+    """
+    db_path = Path(kirocrew_dir) / pol.DATABASES["memory"]
+    if not db_path.exists():
+        return None
+
+    conn = connect_ro(db_path)
+    try:
+        row = conn.execute(
+            "SELECT value FROM memory_meta WHERE key='embedding_space_sig'"
+        ).fetchone()
+        return row["value"] if row else None
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
 def check_embedding_space(kirocrew_dir, repo_dir):
     """Refuse to mix vectors produced by different embedding models.
 
@@ -86,21 +108,7 @@ def check_embedding_space(kirocrew_dir, repo_dir):
     semantic search silently, with no error and no visible corruption.
     """
     results = []
-    db_path = Path(kirocrew_dir) / pol.DATABASES["memory"]
-    if not db_path.exists():
-        return results
-
-    conn = connect_ro(db_path)
-    try:
-        row = conn.execute(
-            "SELECT value FROM memory_meta WHERE key='embedding_space_sig'"
-        ).fetchone()
-        local_sig = row["value"] if row else None
-    except Exception:
-        local_sig = None
-    finally:
-        conn.close()
-
+    local_sig = local_embedding_sig(kirocrew_dir)
     remote_sig = _repo_memory_meta(repo_dir).get("embedding_space_sig")
     if local_sig and remote_sig and local_sig != remote_sig:
         results.append((ERROR,

@@ -128,6 +128,8 @@ full design and its trade-offs.
 - `security_events.jsonl`, `audit.log`, `gateway.log` — local audit logs (often 30 MB+)
 - `.machine_id`, `path_map.conf`, PID files, lock files, `run/`, `cache/`, `logs/`
 - Machine-local database tables: filesystem scan state and transient job state
+- `crons.json` — a synced copy would make every machine fire the same scheduled jobs (duplicate executions, duplicate notifications)
+- `notifications.jsonl` — per-machine delivery history; a notification fired on one machine is not a fact about another
 
 Credential-shaped fields inside synced JSON (`bot_token`, `app_password`,
 `api_key`, …) are stripped before upload and restored from your local file
@@ -306,6 +308,41 @@ side should win:
 # Sync, preferring remote on conflict
 ./kirocrew-sync.sh pull
 ```
+
+### Seeding a new machine
+
+`export` packages this scope's synced state into one file; `import` seeds a
+machine's local state from one. Use this to bootstrap a new machine straight
+from a laptop that already has good data, without both machines needing to
+reach the same backend at once:
+
+```bash
+# On the machine with good data
+./kirocrew-sync.sh export -o snap.tar.gz
+
+# Copy snap.tar.gz to the new machine by any means, then:
+./kirocrew-sync.sh import snap.tar.gz
+```
+
+The archive carries real git history, not just a snapshot of the data — the
+seeded machine ends up with an actual merge base, so its first ordinary
+`sync` with the rest of the pair needs no real merging at all, rather than
+merely merging cleanly. `import` refuses if this machine already has local
+state, and says exactly what `--force` would replace:
+
+```bash
+./kirocrew-sync.sh import snap.tar.gz --force
+```
+
+There is no merge mode. A merge needs two live states *and* their common
+ancestor; a standalone archive has no ancestor against this machine's own
+data, so there is nothing for "merge" to mean here — that is what `sync`
+does, once both machines share real history. `import` only ever replaces,
+and only touches an existing machine's state at all when told `--force`.
+
+Both commands respect `--team`/`--scope`, the same as `sync`: an archive
+exported at one scope refuses to import into the other, so a personal export
+can never seed a colleague's team library by accident.
 
 ### Switching Between Backends
 
@@ -639,6 +676,7 @@ For the other backends, see the troubleshooting section of
 ```bash
 ./tests/run_tests.sh                  # two-machine three-way merge, 61 assertions
 ./tests/test_team_scope.sh            # what team scope shares and withholds
+./tests/test_seed.sh                  # export/import: seeding a new machine
 ./tests/test_portable_paths.sh        # path translation
 ./tests/test_sync_paths.sh            # path round trip between two machines
 ./tests/test_config_precedence.sh     # environment vs config.sh vs defaults

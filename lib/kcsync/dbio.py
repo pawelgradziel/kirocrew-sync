@@ -204,6 +204,27 @@ def unpack_db(db_path, out_dir, db_name, blobs, scope=pol.PERSONAL):
         conn.close()
 
 
+def exported_row_counts(db_path, db_name, scope=pol.PERSONAL):
+    """{table_name: row_count} for the tables this scope would pack.
+
+    Row count is exact (COUNT(*)), which is fine at KiroCrew's actual scale;
+    this exists for the one-time import confirmation prompt, not a hot path.
+    """
+    conn = connect_ro(db_path)
+    try:
+        tables = inspect(conn)
+        counts = {}
+        for name, t in tables.items():
+            p = pol.for_table(db_name, t)
+            if not pol.is_exported(p, scope):
+                continue
+            counts[name] = conn.execute(
+                "SELECT COUNT(*) FROM %s" % _quote(name)).fetchone()[0]
+        return counts
+    finally:
+        conn.close()
+
+
 def stale_jsonl(out_dir, policies, scope=pol.PERSONAL):
     """JSONL files in the repo for tables that no longer exist or are excluded."""
     keep = {name + ".jsonl" for name, p in policies.items()
