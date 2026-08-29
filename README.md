@@ -64,6 +64,18 @@ Two caveats that apply to team use regardless of scope:
 If you need per-user permissions or many simultaneous writers, this is the
 wrong tool.
 
+## Working from any device
+
+[kirocrew-at-cloudflare](https://github.com/pawelgradziel/kirocrew-at-cloudflare)
+runs one KiroCrew brain in a Cloudflare Container, reachable from any browser
+(laptop, Mac, or phone) behind Cloudflare Access. This engine is how that
+cloud crew and your local ones converge: the container is an opt-in peer in
+the same personal/team sync mesh described above, publishing to and pulling
+from an S3-compatible bucket (R2) exactly like a laptop would - no special
+case in the engine for "cloud." See
+[docs/working-from-anywhere.md](https://github.com/pawelgradziel/kirocrew-at-cloudflare/blob/main/docs/working-from-anywhere.md)
+in that repo for the full setup, from zero to every device.
+
 ## Why three-way sync matters here
 
 A one-directional copy forces you to remember which laptop has newer data, and
