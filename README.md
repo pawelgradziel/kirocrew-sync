@@ -115,7 +115,7 @@ full design and its trade-offs.
 
 | Source | Contents |
 | --- | --- |
-| `sessions/*.jsonl` | Chat transcripts (append-only union) |
+| `sessions/*.jsonl`, `sessions/archive/*.jsonl` | Chat transcripts, live and archived (append-only union) |
 | `config.json`, `tags.json`, `tag_boards.json` | Settings (merged key by key) |
 | `session_map.json`, `hooks.json`, `model_windows.json` | Session and runtime metadata |
 | `workspace/memory/` | Workspace memory notes |
@@ -523,7 +523,7 @@ export SYNC_SCOPE="team"
 | Knowledge base (sources, items, entities, relations, mentions) | ✅ | ✅ |
 | Learned lessons (`semantic_memory`) | ✅ | ✅ |
 | Artifacts, `tags.json`, `tag_boards.json` | ✅ | ✅ |
-| Chat transcripts (`sessions/*.jsonl`) | ✅ | ❌ |
+| Chat transcripts, live and archived (`sessions/`) | ✅ | ❌ |
 | Episodic memory — raw conversation text | ✅ | ❌ |
 | Memory event log | ✅ | ❌ |
 | Personal config (`config.json`, `hooks.json`, `autonudge.json`, …) | ✅ | ❌ |

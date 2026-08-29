@@ -137,6 +137,15 @@ def cmd_create(args):
     (root / "sessions" / ("chat-%s.jsonl" % args.name)).write_text(
         json.dumps({"role": "user", "text": "hello from " + args.name}) + "\n",
         encoding="utf-8")
+    # The older turns of that same conversation, rolled out of the live
+    # transcript the way KiroCrew's history.py does it. Same conversation,
+    # second file -- so it has to travel with the first one or the session
+    # reads as truncated on the other machine.
+    archive = root / "sessions" / "archive"
+    archive.mkdir(parents=True, exist_ok=True)
+    (archive / ("chat-%s__20260101-000000.jsonl" % args.name)).write_text(
+        json.dumps({"role": "user", "text": "older turn from " + args.name}) + "\n",
+        encoding="utf-8")
     # Must never leave the machine.
     (root / "mcp.json").write_text(
         json.dumps({"mcpServers": {"x": {"env": {"API_KEY": "live-token"}}}}),
@@ -257,6 +266,8 @@ def cmd_dump(args):
     config.get("telegram", {}).pop("bot_token", None)
     out["config"] = config
     out["sessions"] = sorted(p.name for p in (root / "sessions").glob("*.jsonl"))
+    out["session_archives"] = sorted(
+        p.name for p in (root / "sessions" / "archive").glob("*.jsonl"))
     print(json.dumps(out, indent=2, sort_keys=True))
     return 0
 

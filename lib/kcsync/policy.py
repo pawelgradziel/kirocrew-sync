@@ -98,6 +98,16 @@ OVERRIDES = {
         "mentions": TablePolicy(UNION, shared=True),
         "source_locations": TablePolicy(UNION, shared=True),
         "artifact_item_state": TablePolicy(LWW, ts_col="updated_at", shared=True),
+        # Added by KiroCrew 0.5.x. Upstream documents it as the same shape and
+        # role as artifact_item_state, for the aggregate `agent://` "Auto-added"
+        # source: per-document state so one document can be replaced or removed
+        # without touching the rest. Shared for the same reason its twin is --
+        # `sources` and `items` already travel, and this is the per-document
+        # unit that makes those items independently removable at the other end.
+        # Its `slug` is content-derived (agent_source.document_slug), not a
+        # filesystem path, so unlike folder_file_state it discloses no local
+        # layout.
+        "agent_item_state": TablePolicy(LWW, ts_col="updated_at", shared=True),
         # Tombstones for auto-discovered project directories on *this* machine.
         # Useless to a colleague and it discloses their local layout.
         "dismissed_auto_sources": TablePolicy(UNION),
