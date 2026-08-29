@@ -25,16 +25,25 @@ export SYNC_PORTABLE_PATHS=1
 export KIROCREW_PATH_MAP="$KIROCREW_DIR/path_map.conf"
 
 # Backend-specific settings
-# Edit backends/${SYNC_BACKEND}.sh for backend credentials and paths
+# Every backend reads the environment before its own defaults, so these can be
+# exported here rather than edited into backends/${SYNC_BACKEND}.sh
 
 # Google Drive settings (edit backends/gdrive.sh)
 # - GDRIVE_REMOTE_NAME: rclone remote name (default: kirocrew-gdrive)
 # - GDRIVE_SYNC_DIR: folder name in Google Drive (default: KiroCrew-Sync)
 
-# S3 settings (edit backends/s3.sh)
+# S3 settings (set them here; the backend reads the environment first)
 # - S3_BUCKET: your S3 bucket name
 # - S3_PREFIX: prefix/folder in bucket (default: kirocrew-sync)
 # - AWS_PROFILE: AWS CLI profile name (default: default)
+# - S3_ENDPOINT_URL: S3-compatible endpoint; empty (default) means AWS S3
+# - S3_REGION: region passed to every call; empty (default) leaves it to the profile
+# The same backend drives any S3-compatible store. Cloudflare R2 below; its
+# keys live in the AWS_PROFILE profile like any others -- docs/backends/s3.md:
+# export S3_BUCKET="kirocrew-state"
+# export AWS_PROFILE="r2"
+# export S3_ENDPOINT_URL="https://<account-id>.r2.cloudflarestorage.com"
+# export S3_REGION="auto"
 
 # Rsync settings (edit backends/rsync.sh)
 # - RSYNC_HOST: user@hostname

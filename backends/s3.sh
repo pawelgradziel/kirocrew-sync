@@ -3,11 +3,76 @@
 # AWS S3 backend for KiroCrew Sync
 # Uses AWS CLI
 #
+# Also drives S3-compatible object stores -- Cloudflare R2, MinIO, Backblaze
+# B2 -- which speak the same S3 API through this same `aws` CLI and differ
+# only in where the request is sent and what region name they accept. See
+# S3_ENDPOINT_URL / S3_REGION below and docs/backends/s3.md.
+#
 
 # Configuration
 S3_BUCKET="${S3_BUCKET:-your-bucket-name}"
 S3_PREFIX="${S3_PREFIX:-kirocrew-sync}"
 AWS_PROFILE="${AWS_PROFILE:-default}"
+# Empty (the default) means plain AWS S3: the corresponding flag is then not
+# passed at all, so nothing about the commands this file runs changes.
+# Cloudflare R2: S3_ENDPOINT_URL="https://<account-id>.r2.cloudflarestorage.com"
+# and S3_REGION="auto", the region R2 documents for its S3 API.
+S3_ENDPOINT_URL="${S3_ENDPOINT_URL:-}"
+S3_REGION="${S3_REGION:-}"
+
+# The arguments every `aws` call in this file carries, assembled in exactly
+# one place. Five call sites need them -- the bucket probe in
+# check_s3_configured (which backend_push, backend_pull and backend_status
+# all run first), the two `aws s3 sync`s, and the listings in backend_list
+# and backend_status. Hand-threading the flags into each is the kind of
+# duplicate list that drifts, and a call site that missed --endpoint-url
+# would not fail loudly -- it would quietly talk to real AWS instead of the
+# store the user configured.
+#
+# An array, appended to conditionally, so an unset variable contributes *no*
+# argument at all: an inline --endpoint-url "$S3_ENDPOINT_URL" would pass an
+# empty string as the endpoint whenever the variable is unset, which the CLI
+# rejects rather than ignores.
+#
+# Lands in the global AWS_S3_ARGS rather than being echoed, because echoing
+# would lose the argument boundaries -- and because check_s3_configured()
+# reuses it to print setup commands carrying the same flags this backend
+# actually uses, instead of keeping a second, drifting copy of them.
+aws_s3_args() {
+    AWS_S3_ARGS=(--profile "$AWS_PROFILE")
+    if [ -n "$S3_ENDPOINT_URL" ]; then
+        AWS_S3_ARGS+=(--endpoint-url "$S3_ENDPOINT_URL")
+    fi
+    if [ -n "$S3_REGION" ]; then
+        AWS_S3_ARGS+=(--region "$S3_REGION")
+    fi
+}
+
+# Runs `aws s3 ...` with those arguments. Operands come first, then the
+# common arguments, then anything after a literal `--`:
+#
+#   aws_s3 sync "$dir" "s3://b/p/" -- --delete --exclude "*.lock"
+#   -> aws s3 sync "$dir" "s3://b/p/" --profile "$AWS_PROFILE" --delete ...
+#
+# The separator exists so the common arguments land exactly where each call
+# site used to hand-write --profile: with S3_ENDPOINT_URL and S3_REGION
+# unset the command line is then identical, argument for argument, to the
+# one this backend ran before either variable existed. That is not a
+# stylistic point -- tests/test_backend_s3_endpoint.sh asserts those exact
+# command lines, so an AWS user's behavior cannot change under them.
+aws_s3() {
+    local -a operands=()
+    while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+        operands+=("$1")
+        shift
+    done
+    if [ "$#" -gt 0 ]; then
+        shift
+    fi
+
+    aws_s3_args
+    aws s3 "${operands[@]}" "${AWS_S3_ARGS[@]}" "$@"
+}
 
 check_aws_cli() {
     if ! command -v aws &> /dev/null; then
@@ -21,16 +86,49 @@ check_aws_cli() {
 }
 
 check_s3_configured() {
-    if ! aws s3 ls "s3://${S3_BUCKET}" --profile "$AWS_PROFILE" &>/dev/null; then
-        log_error "Cannot access S3 bucket: ${S3_BUCKET}"
+    if aws_s3 ls "s3://${S3_BUCKET}" &>/dev/null; then
+        return 0
+    fi
+
+    # Rendered from the same array the failing call itself used, so every
+    # command suggested below carries the endpoint and region this backend
+    # is actually configured with. Pointed at a custom endpoint, the AWS
+    # advice is not merely incomplete but wrong: `aws configure` would be
+    # storing the wrong provider's keys, and an `aws s3 mb` without
+    # --endpoint-url would try to create the bucket in real AWS.
+    aws_s3_args
+
+    log_error "Cannot access S3 bucket: ${S3_BUCKET}"
+    log_info ""
+
+    if [ -n "$S3_ENDPOINT_URL" ]; then
+        log_info "Endpoint: ${S3_ENDPOINT_URL}"
+        log_info "(an S3-compatible store, not AWS S3)"
         log_info ""
+        log_info "To configure it:"
+        log_info ""
+        log_info "1. Put that store's own access key and secret -- not AWS"
+        log_info "   credentials -- in the profile this backend uses:"
+        log_info "   aws configure --profile $AWS_PROFILE"
+        log_info ""
+        log_info "2. Create the bucket, in the provider's console or with:"
+        log_info "   aws s3 mb s3://${S3_BUCKET} ${AWS_S3_ARGS[*]}"
+        log_info ""
+        log_info "3. Versioning and retention are set in the provider's own"
+        log_info "   console -- not every store implements the s3api calls"
+        log_info "   AWS does."
+        log_info ""
+        log_info "4. Keep S3_BUCKET, S3_ENDPOINT_URL and S3_REGION in"
+        log_info "   config.sh (see config.sh.example). Cloudflare R2 needs"
+        log_info "   S3_REGION=auto; see docs/backends/s3.md"
+    else
         log_info "To configure S3:"
         log_info ""
         log_info "1. Configure AWS credentials:"
         log_info "   aws configure --profile $AWS_PROFILE"
         log_info ""
         log_info "2. Create S3 bucket:"
-        log_info "   aws s3 mb s3://${S3_BUCKET} --profile $AWS_PROFILE"
+        log_info "   aws s3 mb s3://${S3_BUCKET} ${AWS_S3_ARGS[*]}"
         log_info ""
         log_info "3. Enable versioning (recommended):"
         log_info "   aws s3api put-bucket-versioning \\"
@@ -38,10 +136,17 @@ check_s3_configured() {
         log_info "     --versioning-configuration Status=Enabled \\"
         log_info "     --profile $AWS_PROFILE"
         log_info ""
-        log_info "4. Update backends/s3.sh with your bucket name"
+        log_info "4. Set S3_BUCKET (and S3_PREFIX, AWS_PROFILE) in config.sh"
+        log_info "   -- see config.sh.example. The environment and config.sh"
+        log_info "   are both read before this file's own defaults, so there"
+        log_info "   is nothing to edit in backends/s3.sh."
         log_info ""
-        exit 1
+        log_info "   On Cloudflare R2 or another S3-compatible store, set"
+        log_info "   S3_ENDPOINT_URL and S3_REGION too -- docs/backends/s3.md"
     fi
+
+    log_info ""
+    exit 1
 }
 
 backend_push() {
@@ -52,8 +157,7 @@ backend_push() {
     
     log_info "Uploading to S3..."
     
-    if aws s3 sync "$bundle_dir" "s3://${S3_BUCKET}/${S3_PREFIX}/" \
-        --profile "$AWS_PROFILE" \
+    if aws_s3 sync "$bundle_dir" "s3://${S3_BUCKET}/${S3_PREFIX}/" -- \
         --delete \
         --exclude "*.lock" \
         --exclude "*.tmp"; then
@@ -72,8 +176,7 @@ backend_pull() {
     
     log_info "Downloading from S3..."
     
-    if aws s3 sync "s3://${S3_BUCKET}/${S3_PREFIX}/" "$bundle_dir" \
-        --profile "$AWS_PROFILE" \
+    if aws_s3 sync "s3://${S3_BUCKET}/${S3_PREFIX}/" "$bundle_dir" -- \
         --exclude "*.lock" \
         --exclude "*.tmp"; then
         log_success "Downloaded from S3: s3://${S3_BUCKET}/${S3_PREFIX}/"
@@ -102,12 +205,11 @@ backend_list() {
     # Unlike a real filesystem, S3 has no directories to be "missing": `ls`
     # on a bucket that exists but has zero matching keys still exits 0 with
     # empty output, so a bare non-zero exit here is unambiguously "bucket
-    # unreachable" (bad credentials, wrong bucket, network down) and empty
-    # output alone (with rc=0) is unambiguously "reachable, nothing
-    # published yet" -- no separate reachability probe needed.
+    # unreachable" (bad credentials, wrong bucket, wrong endpoint, network
+    # down) and empty output alone (with rc=0) is unambiguously "reachable,
+    # nothing published yet" -- no separate reachability probe needed.
     local listing
-    listing=$(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/bundles/" \
-        --profile "$AWS_PROFILE" 2>/dev/null) || return 1
+    listing=$(aws_s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/bundles/" 2>/dev/null) || return 1
 
     local bundles
     bundles=$(printf '%s\n' "$listing" | awk '/\.bundle$/ {print $4, $3, $1, $2}')
@@ -123,16 +225,23 @@ backend_list() {
 backend_status() {
     check_aws_cli
     
-    log_info "Backend: AWS S3"
+    if [ -n "$S3_ENDPOINT_URL" ]; then
+        log_info "Backend: S3-compatible store"
+        log_info "Endpoint: $S3_ENDPOINT_URL"
+    else
+        log_info "Backend: AWS S3"
+    fi
     log_info "Bucket: s3://${S3_BUCKET}/${S3_PREFIX}/"
     log_info "Profile: $AWS_PROFILE"
+    if [ -n "$S3_REGION" ]; then
+        log_info "Region: $S3_REGION"
+    fi
     
     if check_s3_configured 2>/dev/null; then
         log_success "S3 bucket accessible"
         
         local listing
-        listing="$(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/bundles/" \
-            --profile "$AWS_PROFILE" 2>/dev/null || true)"
+        listing="$(aws_s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/bundles/" 2>/dev/null || true)"
         local bundles
         bundles="$(printf '%s\n' "$listing" | awk '/\.bundle$/ {print $NF}')"
         if [ -n "$bundles" ]; then
