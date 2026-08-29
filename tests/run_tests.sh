@@ -295,6 +295,11 @@ sync_machine a sync > /dev/null
 DA="$(dump a)"; DB="$(dump b)"
 assert_contains "A has B's session file"  "$DA" "chat-b.jsonl"
 assert_contains "B has A's session file"  "$DB" "chat-a.jsonl"
+# The older half of a long conversation lives in a second file under
+# sessions/archive/. It has to travel with the live transcript, or the same
+# session reads as truncated on the machine that did not write it.
+assert_contains "A has B's archived turns" "$DA" "chat-b__20260101-000000.jsonl"
+assert_contains "B has A's archived turns" "$DB" "chat-a__20260101-000000.jsonl"
 assert_eq       "machines converged"      "$DA" "$DB"
 
 # The FTS index is derived data: it is never merged, only rebuilt after pack.

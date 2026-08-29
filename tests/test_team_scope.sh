@@ -112,6 +112,7 @@ assert_contains "and it works the other way"            "$DA" "lesson.from-bob"
 
 # The whole point of the scope: these stay home.
 assert_not_contains "chat transcript did not cross" "$DB" "chat-alice.jsonl"
+assert_not_contains "archived turns did not cross"  "$DB" "chat-alice__20260101-000000.jsonl"
 assert_not_contains "personal config did not cross" "$DB" "alices-private-agent"
 assert_not_contains "episodic memory did not cross" "$(episodic bob)" \
     "private conversation on alice"
@@ -124,6 +125,8 @@ assert_contains     "scan is non-vacuous"          "$SCAN" "item-alice"
 assert_contains     "shared lesson was published"  "$SCAN" "lesson.from-alice"
 assert_not_contains "no transcript published"      "$SCAN" "chat-alice.jsonl"
 assert_not_contains "no transcript body published" "$SCAN" "hello from alice"
+assert_not_contains "no archived turns published"  "$SCAN" "chat-alice__20260101-000000.jsonl"
+assert_not_contains "no archived body published"   "$SCAN" "older turn from alice"
 assert_not_contains "no episodic memory published" "$SCAN" "private conversation on alice"
 assert_not_contains "no personal config published" "$SCAN" "alices-private-agent"
 assert_not_contains "no memory event log published" "$SCAN" "memory_events.jsonl"
@@ -134,6 +137,8 @@ head_ "Scenario 3: team scope leaves personal data on the machine intact"
 # Packing a team repo must not delete the rows it never carried.
 assert_contains "alice still has her own transcript" \
     "$(ls "$WORK/alice/sessions")" "chat-alice.jsonl"
+assert_contains "alice still has her archived turns" \
+    "$(ls "$WORK/alice/sessions/archive")" "chat-alice__20260101-000000.jsonl"
 assert_contains "alice still has her episodic memory" \
     "$(episodic alice)" "private conversation on alice"
 assert_contains "alice still has her own config" \

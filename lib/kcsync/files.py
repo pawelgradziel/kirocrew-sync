@@ -29,6 +29,13 @@ ALLOW = [
     "autonudge.json",
     "hooks.json",
     "sessions/*.jsonl",
+    # KiroCrew rolls the older turns of a long conversation out of the live
+    # transcript into `sessions/archive/<key>__<stamp>.jsonl` (history.py).
+    # Without this line the live half of a long session crosses machines and
+    # its older half does not, so the same conversation reads as truncated on
+    # the second machine. Listed explicitly because the glob above is
+    # deliberately non-recursive.
+    "sessions/archive/*.jsonl",
     "workspace/*.md",
     "workspace/memory/**",
     "artifacts/**",

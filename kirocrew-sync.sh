@@ -405,8 +405,11 @@ db/*/_schema.sql        merge=binary
 db/*/_policy.json       merge=ours
 # Structural merge, key by key.
 files/**/*.json         merge=kcsync-json
-# Session transcripts are append-only.
+# Session transcripts are append-only. The archive segments a long
+# conversation rolls its older turns into are too, and `*` does not cross '/',
+# so they need their own line to get the same driver.
 files/sessions/*.jsonl  merge=union
+files/sessions/archive/*.jsonl  merge=union
 # Content-addressed: identical path implies identical bytes.
 blob/**                 binary
 * text=auto eol=lf
