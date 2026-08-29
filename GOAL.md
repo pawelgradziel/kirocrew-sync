@@ -153,7 +153,14 @@ These are real gaps, deliberately recorded rather than hidden:
    exercised only against stubs and a local directory. This now includes their
    `backend_list` fingerprints, which are syntax-checked and written against
    each tool's documented behavior but never run against a live remote. The
-   rsync one additionally assumes GNU `stat` on the remote host.
+   rsync one additionally assumes GNU `stat` on the remote host. It also
+   includes S3-compatible endpoints: `S3_ENDPOINT_URL` / `S3_REGION` reach
+   every `aws` call the S3 backend makes, and
+   `tests/test_backend_s3_endpoint.sh` asserts those command lines literally
+   against a stub `aws` — including that an AWS user's commands are unchanged
+   when both are unset — but no bundle has been pushed to a live Cloudflare R2
+   bucket. What is proven is that the commands are right, not that R2 accepts
+   them.
 6. **`iconPath` only resolves if published to a registry.** A side-loaded
    install has no route serving an app's own `ui/` dir; the lucide `icon`
    name is what actually renders in the nav.

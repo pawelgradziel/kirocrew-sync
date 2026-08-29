@@ -174,7 +174,7 @@ Other backends need their own tools — see [Storage Backends](#storage-backends
 | Backend | `SYNC_BACKEND` | Needs | Setup |
 | --- | --- | --- | --- |
 | **Google Drive** (default, recommended) | `gdrive` | `rclone` | [below](#google-drive-default) |
-| AWS S3 | `s3` | `awscli` | [docs/backends/s3.md](docs/backends/s3.md) |
+| AWS S3, or any S3-compatible store (Cloudflare R2, MinIO) | `s3` | `awscli` | [docs/backends/s3.md](docs/backends/s3.md) |
 | Rsync (direct host or NAS) | `rsync` | `rsync`, SSH access | [docs/backends/rsync.md](docs/backends/rsync.md) |
 | Local directory (Dropbox, Syncthing, NAS mount, USB) | `local` | nothing | set `LOCAL_SYNC_DIR` |
 | Your own | any | whatever you script | [docs/backends/custom.md](docs/backends/custom.md) |
@@ -233,9 +233,11 @@ below are done.
 
 ### Other Backends
 
-Prefer somewhere else? Set up [AWS S3](docs/backends/s3.md), sync straight to a
-machine you own with [rsync](docs/backends/rsync.md), point the `local` backend
-at a folder that already reaches your other machines, or
+Prefer somewhere else? Set up [AWS S3](docs/backends/s3.md) — or Cloudflare R2
+or any other S3-compatible store, through that same backend and the same `aws`
+CLI — sync straight to a machine you own with [rsync](docs/backends/rsync.md),
+point the `local` backend at a folder that already reaches your other machines,
+or
 [write your own](docs/backends/custom.md) — a backend is one bash file with
 three functions.
 
@@ -635,16 +637,21 @@ For the other backends, see the troubleshooting section of
 ## Tests
 
 ```bash
-./tests/run_tests.sh               # two-machine three-way merge, 59 assertions
-./tests/test_team_scope.sh         # what team scope shares and withholds
-./tests/test_portable_paths.sh     # path translation
-./tests/test_sync_paths.sh         # path round trip between two machines
-./tests/test_config_precedence.sh  # environment vs config.sh vs defaults
+./tests/run_tests.sh                  # two-machine three-way merge, 61 assertions
+./tests/test_team_scope.sh            # what team scope shares and withholds
+./tests/test_portable_paths.sh        # path translation
+./tests/test_sync_paths.sh            # path round trip between two machines
+./tests/test_config_precedence.sh     # environment vs config.sh vs defaults
+./tests/test_backend_local_list.sh    # the remote-state fingerprint contract
+./tests/test_backend_s3_endpoint.sh   # S3 command lines, AWS and S3-compatible
+./tests/test_daemon.sh                # the polling daemon
 ```
 
 They simulate a second machine by overriding `$HOME` or by pointing two
-throwaway KiroCrew directories at a local-directory backend, so they need no
-remote storage and touch nothing outside a temporary directory.
+throwaway KiroCrew directories at a local-directory backend — and, for the S3
+suite, at a stub `aws` earlier on `PATH` that records the command lines it is
+given — so they need no remote storage and touch nothing outside a temporary
+directory.
 
 ## Security Considerations
 
