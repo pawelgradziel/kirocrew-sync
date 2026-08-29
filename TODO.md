@@ -48,3 +48,30 @@ Option 1 unless there is a reason the app cannot change.
 Whatever creates the rows, they land in `knowledge.db` and sync like any other
 knowledge rows. Note that imported sources carry a `uri`, so ADR 0001 path
 portability applies, and in `team` scope those URIs are visible to colleagues.
+
+## Sync the kiro-cli half of a session
+
+A session has two halves on disk and only one of them is inside the sync root.
+
+**What is already checked** (against KiroCrew v0.5.0-insider.3)
+
+- KiroCrew writes crew transcripts to `<data home>/sessions/*.jsonl`, with the
+  older turns of a long conversation rolled into
+  `sessions/archive/<key>__<stamp>.jsonl`. Both now sync — see
+  [docs/upstream-sync-review-2026-08-29.md](docs/upstream-sync-review-2026-08-29.md).
+- kiro-cli writes its own replay logs to `kiro_sessions_dir()` =
+  `<kiro home>/sessions/cli`, i.e. `~/.kiro/sessions/cli` — **outside**
+  `~/.kiro/crew`. `config/paths.py` honors `KIRO_HOME` for it.
+- Upstream treats the pair as one unit: the AWS Control app's backup module
+  tars "BOTH session halves" together and calls it an invariant.
+- `session_storage.py` scans both directories to build one session inventory,
+  so a machine with only the crew half has sessions whose replay log is
+  missing.
+
+**Why it is not a one-line fix**
+
+`ALLOW` is relative to `KIROCREW_DIR`, so there is no glob that reaches
+`~/.kiro/sessions/cli`. It needs a second sync root: a `KIRO_HOME`-derived
+path, its own allowlist, and a decision about what `pack` does when the two
+halves disagree. Team scope needs nothing — CLI replay logs are transcripts
+and stay home for the same reason the crew half does.
