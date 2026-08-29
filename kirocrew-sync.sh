@@ -606,8 +606,73 @@ apply_to_kirocrew() {
     touch "$PACK_MARKER" 2>/dev/null || true
 }
 
+# bundle_name() is <machine-id>.bundle -- no scope component. Changing that
+# would be a wire-format break (every existing deployment's bundles are named
+# this way; see ADR 0002's wire-format caveat), so instead this is a guard: if
+# the SAME machine has already published a bundle under a DIFFERENT scope at
+# this same backend location, publishing here would silently overwrite it --
+# whichever scope publishes second wins the filename, and the other scope's
+# state is simply gone from the remote, even though it is untouched locally.
+#
+# fetch_bundles() skips this machine's own bundle on purpose (there is
+# nothing to merge from yourself), so the ordinary per-remote-machine compat
+# check in check_remote_compat() never looks at it -- that function is what
+# owns "read .kcsync-scope out of a fetched ref" (git show <ref>:.kcsync-scope
+# | tr -d whitespace, legacy/absent meaning personal), and this reuses that
+# exact mechanism pointed at our own bundle rather than inventing a second way
+# to read the same file.
+check_own_scope_collision() {
+    local temp_dir="$1"
+    local own_bundle="$temp_dir/bundles/$(bundle_name)"
+    [ -f "$own_bundle" ] || return 0
+
+    # A private ref namespace, deliberately NOT refs/remotes/* -- that is what
+    # merge_remote_refs() scans for machines to merge, and this is not one: it
+    # is our own previously-published bundle, fetched only to read one file
+    # out of its tree. Keeping it out of refs/remotes/ means a ref this
+    # function fails to clean up (a crash between fetch and delete, say) is
+    # simply invisible to every other function here, rather than being merged
+    # on the next sync as a phantom machine named after this scratch ref.
+    local scratch_ref="refs/kcsync-self/$SYNC_BRANCH"
+    git_repo update-ref -d "$scratch_ref" > /dev/null 2>&1 || true
+
+    if ! git_repo bundle verify "$own_bundle" > /dev/null 2>&1; then
+        return 0   # unreadable; not this guard's problem to diagnose
+    fi
+    # Force-fetch (leading +): this ref never has real history of its own to
+    # fast-forward from, only whatever a previous, possibly-interrupted run of
+    # this same check left behind.
+    if ! git_repo fetch -q "$own_bundle" \
+        "+refs/heads/$SYNC_BRANCH:$scratch_ref" 2>/dev/null; then
+        return 0
+    fi
+
+    local remote_scope
+    remote_scope="$(git_repo show "$scratch_ref:.kcsync-scope" 2>/dev/null \
+        | tr -d '[:space:]')"
+    git_repo update-ref -d "$scratch_ref" > /dev/null 2>&1 || true
+    # Legacy bundles predate the scope marker; absent means personal -- same
+    # fallback check_remote_compat() uses for every other machine's bundle.
+    [ -n "$remote_scope" ] || remote_scope="personal"
+
+    if [ "$remote_scope" != "$SYNC_SCOPE" ]; then
+        log_error "Remote already holds a bundle for this machine ($(get_machine_id))"
+        log_error "published at scope '$remote_scope'; this run is scope '$SYNC_SCOPE'."
+        log_info ""
+        log_info "Bundle filenames carry no scope, so publishing now would overwrite that"
+        log_info "machine's '$remote_scope' bundle with this '$SYNC_SCOPE' one and corrupt"
+        log_info "both. Give each scope its own backend location -- a different S3_PREFIX,"
+        log_info "LOCAL_SYNC_DIR, or remote directory -- through a separate config file"
+        log_info "selected with KIROCREW_SYNC_CONFIG, e.g.:"
+        log_info "  KIROCREW_SYNC_CONFIG=~/.kiro/crew/team-config.sh $0 sync --team"
+        return 1
+    fi
+    return 0
+}
+
 publish_bundle() {
     local temp_dir="$1"
+    check_own_scope_collision "$temp_dir" || exit 1
     mkdir -p "$temp_dir/bundles"
     git_repo bundle create "$temp_dir/bundles/$(bundle_name)" "$SYNC_BRANCH" \
         > /dev/null 2>&1

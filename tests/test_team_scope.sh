@@ -185,6 +185,35 @@ assert_eq "team repo carries no transcripts" \
 assert_contains "personal repo does carry them" \
     "$(ls "$WORK/alice/.sync/repo/files/sessions" 2>/dev/null)" "chat-alice.jsonl"
 
+head_ "Scenario 7: one machine, two scopes, same backend location -- refused, not corrupted"
+# bundle_name() is <machine-id>.bundle, with no scope in it. If the SAME
+# machine publishes personal, then team, against the SAME remote directory,
+# the second publish would silently overwrite the first's bundle under that
+# one filename -- whichever scope runs last wins, and the other is simply
+# gone from the remote. This has to be caught before the second publish, not
+# after.
+rm -rf "$WORK/remote"
+setup_person alice
+sync_as alice sync > /dev/null 2>&1          # personal, publishes machine-alice.bundle
+cp "$WORK/remote/bundles/machine-alice.bundle" "$WORK/before-guard.bundle"
+
+OUT="$(sync_as alice sync --team 2>&1)"; RC=$?
+assert_contains "names the scope already on the remote"   "$OUT" "'personal'"
+assert_contains "names the scope trying to publish"       "$OUT" "'team'"
+assert_contains "explains bundles carry no scope"          "$OUT" "no scope"
+assert_contains "points at a separate backend location"    "$OUT" "KIROCREW_SYNC_CONFIG"
+assert_not_contains "the run did not report success" "$OUT" "Sync complete"
+assert_eq "the run failed" "$RC" "1"
+assert_eq "remote's personal bundle is byte-identical after the refusal" \
+    "$(cmp -s "$WORK/before-guard.bundle" "$WORK/remote/bundles/machine-alice.bundle" \
+        && echo same || echo different)" "same"
+# The failure is at publish time only -- local personal data is untouched,
+# and this machine can still be told about explicitly, so a personal sync
+# right after must work exactly as if the collision attempt never happened.
+OUT2="$(sync_as alice sync 2>&1)"; RC2=$?
+assert_eq       "a same-scope sync afterwards still succeeds" "$RC2" "0"
+assert_contains "and still publishes normally"                "$OUT2" "Sync complete"
+
 # --------------------------------------------------------------------------
 
 echo
