@@ -128,6 +128,8 @@ full design and its trade-offs.
 - `security_events.jsonl`, `audit.log`, `gateway.log` — local audit logs (often 30 MB+)
 - `.machine_id`, `path_map.conf`, PID files, lock files, `run/`, `cache/`, `logs/`
 - Machine-local database tables: filesystem scan state and transient job state
+- `crons.json` — a synced copy would make every machine fire the same scheduled jobs (duplicate executions, duplicate notifications)
+- `notifications.jsonl` — per-machine delivery history; a notification fired on one machine is not a fact about another
 
 Credential-shaped fields inside synced JSON (`bot_token`, `app_password`,
 `api_key`, …) are stripped before upload and restored from your local file

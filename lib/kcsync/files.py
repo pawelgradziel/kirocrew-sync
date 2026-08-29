@@ -41,6 +41,14 @@ ALLOW = [
     "artifacts/**",
 ]
 
+# Deliberately absent, though upstream KiroCrew's own backup component set
+# includes both: crons.json and notifications.jsonl. Not an oversight --
+# a synced crons.json would make every machine fire the same scheduled jobs,
+# so two machines would each run (and duplicate-notify for) work meant to
+# happen once. notifications.jsonl is that same delivery history, which is
+# per-machine noise for the same reason: a notification fired on machine A
+# is not a fact about machine B. See README's "Deliberately not synced" table.
+
 # The subset of ALLOW that travels in team scope. Same opt-in rule as tables
 # (see policy.py): anything not named here stays on the machine, so a file
 # added to ALLOW later never reaches colleagues until someone decides it should.
