@@ -175,12 +175,23 @@ Other backends need their own tools — see [Storage Backends](#storage-backends
    cd kirocrew-sync
    ```
 
-2. **Initialize configuration:**
+2. **R2 / S3-compatible mesh (one command):**
+   ```bash
+   ./onboard.sh
+   ```
+   Discovers your Cloudflare account over wrangler's OAuth session, writes
+   `config.sh`, walks the one dashboard-only step (minting the R2 key pair —
+   no OAuth path exists for that), verifies the bucket with the exact probe
+   the backend runs, and offers the first sync. Safe to re-run; `--scope
+   team`/`both` also writes the team-scope config. Everything below remains
+   the manual equivalent.
+
+3. **Manual path — initialize configuration:**
    ```bash
    ./kirocrew-sync.sh init
    ```
 
-3. **Configure your storage backend** — Google Drive is set up below; for the
+4. **Configure your storage backend** — Google Drive is set up below; for the
    others follow the linked pages in [Storage Backends](#storage-backends)
 
 ## Storage Backends
