@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 
 from . import policy as pol
+from . import stores
 from .dbio import connect_ro, read_jsonl, schema_text
 from .files import SECRET_KEY_RE
 
@@ -36,7 +37,12 @@ def check_schema_drift(kirocrew_dir, repo_dir, scope=pol.PERSONAL):
     every sync and users learn to pass --force.
     """
     results = []
-    for db_name, rel in pol.DATABASES.items():
+    # Every database on this machine, member memory stores included. A store
+    # present on only one side has nothing to compare: the machine without it
+    # creates it at pack time from the repo's DDL. A store on both sides with
+    # a different schema is drift like any other, so the pre-merge check
+    # quarantines that machine until the two agree.
+    for db_name, rel in stores.databases(kirocrew_dir, scope=scope).items():
         db_path = Path(kirocrew_dir) / rel
         schema_file = Path(repo_dir) / "db" / db_name / "_schema.sql"
         if not db_path.exists() or not schema_file.exists():
@@ -69,8 +75,8 @@ def check_schema_drift(kirocrew_dir, repo_dir, scope=pol.PERSONAL):
     return results
 
 
-def _repo_memory_meta(repo_dir):
-    path = Path(repo_dir) / "db" / "memory" / "memory_meta.jsonl"
+def _repo_memory_meta(repo_dir, db_name="memory"):
+    path = Path(repo_dir) / "db" / db_name / "memory_meta.jsonl"
     if not path.exists():
         return {}
     try:
@@ -85,7 +91,11 @@ def local_embedding_sig(kirocrew_dir):
     primitive in cli.py, which checks it against a manifest before anything
     is materialized. One place that knows memory_meta's key/value shape.
     """
-    db_path = Path(kirocrew_dir) / pol.DATABASES["memory"]
+    return _db_embedding_sig(Path(kirocrew_dir) / pol.DATABASES["memory"])
+
+
+def _db_embedding_sig(db_path):
+    """embedding_space_sig from one memory-shaped database's memory_meta."""
     if not db_path.exists():
         return None
 
@@ -101,7 +111,7 @@ def local_embedding_sig(kirocrew_dir):
         conn.close()
 
 
-def check_embedding_space(kirocrew_dir, repo_dir):
+def check_embedding_space(kirocrew_dir, repo_dir, scope=pol.PERSONAL):
     """Refuse to mix vectors produced by different embedding models.
 
     Nothing downstream validates this: mismatched vectors in one index degrade
@@ -117,6 +127,47 @@ def check_embedding_space(kirocrew_dir, repo_dir):
                         % (local_sig[:12], remote_sig[:12])))
     elif local_sig and remote_sig:
         results.append((OK, "embedding space matches (%s)" % local_sig[:12]))
+    if scope == pol.PERSONAL:
+        results.extend(_check_store_embedding_spaces(kirocrew_dir, repo_dir,
+                                                     local_sig))
+    return results
+
+
+def _check_store_embedding_spaces(kirocrew_dir, repo_dir, local_global_sig):
+    """The same check for each member memory store in the remote tree.
+
+    Each store records its own embedding_space_sig (upstream reconciles it
+    per file). A store on both machines with two different signatures is the
+    real hazard -- a merge would put both models' vectors in one file -- so
+    that is an ERROR and the remote machine is quarantined.
+
+    A store that exists only on the remote is compared with this machine's
+    global signature instead, and only warned about: it arrives as its own
+    file, nothing is mixed into an existing one, and KiroCrew reconciles a
+    store's embedding space when it opens it. Refusing would quarantine a
+    whole machine over one idle store that has not been re-embedded yet.
+    """
+    results = []
+    local = set(stores.local_stores(kirocrew_dir))
+    for name in stores.repo_stores(repo_dir):
+        db_name = stores.db_name(name)
+        remote_sig = _repo_memory_meta(repo_dir, db_name).get(
+            "embedding_space_sig")
+        if not remote_sig:
+            continue
+        if name in local:
+            local_sig = _db_embedding_sig(
+                Path(kirocrew_dir) / stores.rel_path(name))
+            if local_sig and local_sig != remote_sig:
+                results.append((ERROR,
+                    "%s: embedding space mismatch (local %s, remote %s); "
+                    "merging would mix incompatible vectors"
+                    % (db_name, local_sig[:12], remote_sig[:12])))
+        elif local_global_sig and local_global_sig != remote_sig:
+            results.append((WARN,
+                "%s: arrives embedded with %s, this machine uses %s; "
+                "KiroCrew reconciles its embedding space when it opens the store"
+                % (db_name, remote_sig[:12], local_global_sig[:12])))
     return results
 
 
@@ -173,7 +224,7 @@ def _find_secret_leaves(value, path=""):
 def run_all(kirocrew_dir, repo_dir, scope=pol.PERSONAL):
     results = []
     results.extend(check_schema_drift(kirocrew_dir, repo_dir, scope))
-    results.extend(check_embedding_space(kirocrew_dir, repo_dir))
+    results.extend(check_embedding_space(kirocrew_dir, repo_dir, scope))
     results.extend(check_item_embedding_sigs(repo_dir))
     results.extend(check_no_secrets(repo_dir))
     return results
@@ -205,7 +256,7 @@ def check_compatibility(kirocrew_dir, remote_dir, label, scope=pol.PERSONAL):
     for level, message in check_schema_drift(kirocrew_dir, remote_dir, scope):
         if level != OK:
             results.append((level, "%s: %s" % (label, message)))
-    for level, message in check_embedding_space(kirocrew_dir, remote_dir):
+    for level, message in check_embedding_space(kirocrew_dir, remote_dir, scope):
         if level != OK:
             results.append((level, "%s: %s" % (label, message)))
     return results

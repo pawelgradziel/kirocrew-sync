@@ -201,15 +201,19 @@ def _read_jsonl_or_die(path, label):
 
 
 def _load_policy(repo_root, rel_path):
-    """Resolve the policy for db/<name>/<table>.jsonl."""
+    """Resolve the policy for db/<name>/<table>.jsonl.
+
+    <name> is one segment for the fixed databases and two for a member memory
+    store (db/memory_stores/<store>/<table>.jsonl).
+    """
     parts = rel_path.replace("\\", "/").split("/")
     if len(parts) < 3 or parts[0] != "db":
         return None, None, None
-    db_name, table = parts[1], parts[-1][:-len(".jsonl")]
+    db_name, table = "/".join(parts[1:-1]), parts[-1][:-len(".jsonl")]
 
-    policy_file = os.path.join(repo_root, "db", db_name, "_policy.json")
+    policy_file = os.path.join(repo_root, "db", *parts[1:-1], "_policy.json")
     identity = None
-    table_policy = pol.OVERRIDES.get(db_name, {}).get(table)
+    table_policy = pol.overrides_for(db_name).get(table)
     try:
         with open(policy_file, "r", encoding="utf-8") as fh:
             stored = json.load(fh)

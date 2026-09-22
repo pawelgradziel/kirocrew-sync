@@ -6,6 +6,7 @@ import argparse
 import collections
 import json
 import os
+import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,7 +15,7 @@ from . import FORMAT_VERSION, gates, merge
 from . import paths as pathmod
 from . import policy as pol
 from .canon import BlobStore
-from . import dbio, files
+from . import dbio, files, stores
 
 
 def _repo_paths(repo):
@@ -37,7 +38,8 @@ def cmd_unpack(args):
     repo.mkdir(parents=True, exist_ok=True)
     blobs = BlobStore(blob_dir)
 
-    for db_name, rel in pol.DATABASES.items():
+    for db_name, rel in stores.databases(kirocrew_dir, scope=args.scope,
+                                         log=log).items():
         db_path = kirocrew_dir / rel
         if not db_path.exists():
             log("  skip %s (not present)" % rel)
@@ -46,6 +48,9 @@ def cmd_unpack(args):
         policies = dbio.unpack_db(db_path, out, db_name, blobs, args.scope)
         for stale in dbio.stale_jsonl(out, policies, args.scope):
             stale.unlink()
+        if pol.is_store_db(db_name):
+            # What a machine without this store needs to create it (pack).
+            stores.write_ddl(db_path, out)
         exported = sum(1 for p in policies.values()
                        if pol.is_exported(p, args.scope))
         skipped = [n for n, p in policies.items() if p.mode == pol.LOCAL]
@@ -56,6 +61,19 @@ def cmd_unpack(args):
             log("    machine-local, not synced: %s" % ", ".join(sorted(skipped)))
         if held:
             log("    personal, held back from the team: %s" % ", ".join(sorted(held)))
+
+    if args.scope != pol.PERSONAL:
+        # Member memory is private and never discovered in team scope. A
+        # store tree in a team repo can only come from a bug or a hand edit;
+        # removing it here keeps it out of the next publish.
+        leaked = db_dir / stores.STORES_DIR
+        if leaked.exists():
+            shutil.rmtree(leaked)
+            log("  removed member memory stores from the team repo")
+        held_stores = stores.local_stores(kirocrew_dir)
+        if held_stores:
+            log("  %d member memory store(s) private, held back from the team"
+                % len(held_stores))
 
     written, redacted, veto = files.unpack_files(kirocrew_dir, files_dir, log,
                                                  args.scope)
@@ -105,11 +123,19 @@ def cmd_pack(args):
         log("  Refusing to pack. Re-run with --force to override.")
         return 2
 
+    # Local stores plus any that arrived from another machine. Team scope
+    # yields the fixed databases only, so a store tree in a team repo is
+    # never packed; say so rather than skip it silently.
+    databases = stores.databases(kirocrew_dir, repo_dir=repo, scope=args.scope,
+                                 log=log)
+    if args.scope != pol.PERSONAL and (db_dir / stores.STORES_DIR).exists():
+        log("  WARN: refusing to pack member memory stores in team scope")
+
     backups = {}
     if not args.dry_run:
         stamp = _timestamp()
         backup_dir = kirocrew_dir / ".sync" / "backups" / stamp
-        for db_name, rel in pol.DATABASES.items():
+        for db_name, rel in databases.items():
             db_path = kirocrew_dir / rel
             if db_path.exists():
                 backups[db_path] = dbio.backup(db_path, backup_dir / db_name)
@@ -117,17 +143,46 @@ def cmd_pack(args):
             log("  backed up %d database(s) to %s"
                 % (len(backups), backup_dir))
 
+    created = []
     try:
-        for db_name, rel in pol.DATABASES.items():
+        for db_name, rel in databases.items():
             db_path = kirocrew_dir / rel
             source = db_dir / db_name
-            if not db_path.exists() or not source.exists():
+            if not source.exists():
                 continue
+            store = stores.store_of(db_name)
+            if store is not None and not stores.writable_here(kirocrew_dir,
+                                                              store):
+                # e.g. memory_stores/<name> here is a link to another store:
+                # packing through it would merge two members' memory.
+                log("  WARN: not packing memory store %s: its directory or "
+                    "database is a link" % store)
+                continue
+            if not db_path.exists():
+                # Only a member store is created here. memory.db and
+                # knowledge.db belong to KiroCrew's own first run.
+                if store is None:
+                    continue
+                if not (source / stores.DDL_FILE).exists():
+                    log("  WARN: memory store %s has no %s in the repo; "
+                        "not created" % (store, stores.DDL_FILE))
+                    continue
+                if args.dry_run:
+                    log("  would create memory store %s" % store)
+                    continue
+                db_path = stores.create_from_repo(kirocrew_dir, store, source)
+                created.append(db_path)
+                log("  created memory store %s from the sync repo" % store)
             stats = dbio.pack_db(db_path, source, db_name, blobs,
                                  dry_run=args.dry_run, log=log,
                                  scope=args.scope)
             log("  packed %s: %d rows written, %d deleted"
                 % (db_name, stats["applied"], stats["deleted"]))
+            if store is not None and not args.dry_run:
+                count = stores.rebuild_member_fts(db_path, log)
+                if count is not None:
+                    log("  rebuilt memory_fts for %s: %d entries"
+                        % (store, count))
             if stats["orphans"]:
                 log("  WARN: %d orphaned row(s) in %s after merge"
                     % (len(stats["orphans"]), db_name))
@@ -143,7 +198,14 @@ def cmd_pack(args):
         for db_path, backup_path in backups.items():
             if backup_path:
                 dbio.restore(backup_path, db_path)
-                log("  restored %s from backup" % db_path.name)
+                log("  restored %s from backup"
+                    % db_path.relative_to(kirocrew_dir))
+        # A store this pack created had nothing to restore: remove it, so the
+        # next sync creates it again from a clean start.
+        for db_path in created:
+            stores.remove_created(db_path)
+            log("  removed partially created %s"
+                % db_path.relative_to(kirocrew_dir))
         return 1
 
     applied = files.pack_files(files_dir, kirocrew_dir,
@@ -204,7 +266,8 @@ def cmd_doctor(args):
         log("  ERROR: directory does not exist")
         return 2
 
-    for db_name, rel in pol.DATABASES.items():
+    for db_name, rel in stores.databases(kirocrew_dir, scope=args.scope,
+                                         log=log).items():
         db_path = kirocrew_dir / rel
         if not db_path.exists():
             log("  %-10s missing (%s)" % (db_name, rel))
@@ -345,7 +408,11 @@ def cmd_seed_check(args):
 # fresh-machine branch of import's existing-state gate unreachable on any
 # machine with a real install -- the exact case the gate exists to let
 # through without --force.
-_BOOKKEEPING_TABLES = frozenset(["schema_version", "memory_meta"])
+#
+# member_database is the same kind of row for a member memory store: its
+# (member_id, store_id) identity, written when the store is created.
+_BOOKKEEPING_TABLES = frozenset(["schema_version", "memory_meta",
+                                 "member_database"])
 
 
 def cmd_seed_has_data(args):
@@ -358,7 +425,8 @@ def cmd_seed_has_data(args):
     """
     kirocrew_dir = Path(args.kirocrew_dir)
     found = False
-    for db_name, rel in pol.DATABASES.items():
+    for db_name, rel in stores.databases(kirocrew_dir,
+                                         scope=args.scope).items():
         db_path = kirocrew_dir / rel
         if not db_path.exists():
             continue
