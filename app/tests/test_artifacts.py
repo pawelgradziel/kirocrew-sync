@@ -409,11 +409,32 @@ def test_derive_sync_changes_classifies_lesson_and_transcript_tables():
 
 
 def test_derive_sync_changes_classifies_file_conflicts_by_path():
-    config = ConflictRecord(table="config.json", key="config.json", kind="value", resolution="kept local")
-    artifact = ConflictRecord(table="artifacts/foo.json", key="artifacts/foo.json", kind="value", resolution="unresolved")
-    transcript = ConflictRecord(table="sessions/2024-01-01.jsonl", key="sessions/2024-01-01.jsonl", kind="value", resolution="kept edit")
+    """A JSON-file conflict is classified by the file it happened in.
+
+    Records are shaped the way merge.py writes them: `table` and `key` hold
+    the JSON key path inside the file, and `path` holds the repo-relative
+    file path git passed to the merge driver.
+    """
+    config = ConflictRecord(table="dashboard.theme", key="dashboard.theme", kind="value",
+                            resolution="kept local", path="files/config.json")
+    artifact = ConflictRecord(table="title", key="title", kind="value",
+                              resolution="unresolved", path="files/artifacts/foo.json")
+    transcript = ConflictRecord(table="<root>", key="", kind="value",
+                                resolution="kept edit", path="files/sessions/2024-01-01.jsonl")
     changes = artifacts.derive_sync_changes("", [config, artifact, transcript])
     assert [c.change_type for c in changes] == ["config", "artifact", "transcript"]
+
+
+def test_derive_sync_changes_ignores_json_key_path_in_table():
+    """The key path must not be mistaken for a file name: a key literally
+    named like a config file, in an unclassifiable file, stays unclassified,
+    and a value conflict with no recorded path is dropped rather than
+    guessed."""
+    misleading = ConflictRecord(table="config.json", key="config.json", kind="value",
+                                resolution="kept local", path="files/workspace/notes.md")
+    no_path = ConflictRecord(table="config.json", key="config.json", kind="value",
+                             resolution="kept local")
+    assert artifacts.derive_sync_changes("", [misleading, no_path]) == []
 
 
 def test_derive_sync_changes_drops_unclassifiable_conflicts():
@@ -421,7 +442,8 @@ def test_derive_sync_changes_drops_unclassifiable_conflicts():
     honestly attributed to any single change_type -- they are dropped, not
     guessed."""
     bookkeeping = ConflictRecord(table="memory_events", key="e1", kind="edit/edit", resolution="kept local")
-    workspace_note = ConflictRecord(table="workspace/notes.md", key="workspace/notes.md", kind="value", resolution="kept remote")
+    workspace_note = ConflictRecord(table="title", key="title", kind="value",
+                                    resolution="kept remote", path="files/workspace/notes.md")
     assert artifacts.derive_sync_changes("", [bookkeeping, workspace_note]) == []
 
 

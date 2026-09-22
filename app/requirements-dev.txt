@@ -8,3 +8,4 @@
 -r requirements.txt
 
 pytest>=7.4.0
+httpx>=0.24.0  # starlette TestClient, used by tests/test_server.py

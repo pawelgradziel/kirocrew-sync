@@ -318,9 +318,11 @@ TABLE_TO_CHANGE_TYPE: Dict[str, str] = {
     # be a guess, not a mapping.
 }
 
-# JSON-file conflicts (merge.py driver_json(), kind="value") record the
-# relative path as `table` -- see files.py's ALLOW list for what each of
-# these actually is.
+# JSON-file conflicts (merge.py driver_json(), kind="value") carry the file
+# in `path`, as git hands it to the merge driver (%P): repo-relative, so
+# "files/config.json". `table` holds the JSON key path inside that file
+# ("dashboard.theme"), which says nothing about the kind of change. See
+# files.py's ALLOW list for what each of these files actually is.
 #
 # session_map.json and autonudge.json no longer sync (files.py DENY: KiroCrew
 # rewrites both from machine-local state, and the merge carried that rewrite
@@ -334,6 +336,11 @@ _CONFIG_FILE_NAMES = frozenset({
     "admission_policy.json", "model_windows.json", "autonudge.json",
     "hooks.json", "connections_ui_migrated.json", "superseded_acked.json",
 })
+
+
+# Allowlisted files live under this directory of the sync repo (cli.py
+# _repo_paths), so a conflict's `path` starts with it.
+_REPO_FILES_PREFIX = "files/"
 
 
 def _classify_path(path: str) -> Optional[str]:
@@ -357,7 +364,12 @@ def _classify_conflict(record: ConflictRecord) -> Optional[str]:
     cannot be honestly classified (see TABLE_TO_CHANGE_TYPE / _classify_path
     docstrings for what is deliberately left out)."""
     if record.kind == "value":
-        return _classify_path(record.table)
+        if not record.path:
+            return None
+        rel = record.path
+        if rel.startswith(_REPO_FILES_PREFIX):
+            rel = rel[len(_REPO_FILES_PREFIX):]
+        return _classify_path(rel)
     return TABLE_TO_CHANGE_TYPE.get(record.table)
 
 

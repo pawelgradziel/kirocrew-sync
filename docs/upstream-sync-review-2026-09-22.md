@@ -289,9 +289,11 @@ that a repo written by an older build cannot plant another machine's values.
   `merge_json` records the JSON key path there (for example
   `dashboard.theme`), and the file path is in `record.path`. So real
   config-file conflicts are never classified. The unit test builds records
-  with the file name in `table`, which is why it passes. `session_map.json` and
-  `autonudge.json` stay in `_CONFIG_FILE_NAMES` (the comment there explains
-  why), but the classifier should read `record.path`.
+  with the file name in `table`, which is why it passes. **Fixed:** the
+  classifier now reads `record.path` (dropping the repo's `files/` prefix), and
+  `app/tests/test_artifacts.py` builds records the way `merge.py` writes them.
+  `session_map.json` and `autonudge.json` stay in `_CONFIG_FILE_NAMES` (the
+  comment there explains why).
 
 ### Decided (2026-09-22)
 

@@ -76,7 +76,7 @@ join) and a bundle-based alternative to a second sync root are in
 [docs/upstream-sync-review-2026-09-22.md](docs/upstream-sync-review-2026-09-22.md).
 
 **Decided 2026-09-22** — see
-[ADR 0003](docs/adr/0003-kiro-cli-session-half.md) (Proposed). `sync` will not
+[ADR 0003](docs/adr/0003-kiro-cli-session-half.md) (Accepted). `sync` will not
 carry this half: no second sync root, and `session_map.json` stays `DENY`'d.
 A resumable copy moves through the separate, explicit
 `send-session --include-layer-b` / `inbox --install` commands (see the README),

@@ -1,6 +1,6 @@
 # ADR 0003: The kiro-cli half of a session is not synced; resumable copies are sent, not merged
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-09-22)
 - **Date:** 2026-09-22
 - **Deciders:** kirocrew-sync maintainers
 - **Checked against:** `kirodotdev/KiroCrew` `main` at `f7b6e6fb` (2026-09-22).
