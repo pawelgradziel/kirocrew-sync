@@ -156,11 +156,14 @@ backend_push() {
     check_s3_configured
     
     log_info "Uploading to S3..."
-    
+
+    # mailbox/ holds send-session bundles, not sync state. `aws s3 sync
+    # --delete` never deletes an excluded key, so this keeps them alive.
     if aws_s3 sync "$bundle_dir" "s3://${S3_BUCKET}/${S3_PREFIX}/" -- \
         --delete \
         --exclude "*.lock" \
-        --exclude "*.tmp"; then
+        --exclude "*.tmp" \
+        --exclude "mailbox/*"; then
         log_success "Uploaded to S3: s3://${S3_BUCKET}/${S3_PREFIX}/"
     else
         log_error "Upload failed"
@@ -178,7 +181,8 @@ backend_pull() {
     
     if aws_s3 sync "s3://${S3_BUCKET}/${S3_PREFIX}/" "$bundle_dir" -- \
         --exclude "*.lock" \
-        --exclude "*.tmp"; then
+        --exclude "*.tmp" \
+        --exclude "mailbox/*"; then
         log_success "Downloaded from S3: s3://${S3_BUCKET}/${S3_PREFIX}/"
     else
         log_error "Download failed"
@@ -258,4 +262,48 @@ backend_status() {
     else
         log_warn "S3 bucket not accessible"
     fi
+}
+
+# --------------------------------------------------------------------------
+# Session mailbox (send-session / inbox). Contract: docs/backends/custom.md,
+# "Mailbox functions". Keys live under s3://$S3_BUCKET/$S3_PREFIX/mailbox/ and
+# the relative path is "<recipient>/<file>". Every call goes through aws_s3,
+# so the endpoint and region settings apply here exactly as they do to sync.
+
+s3_mailbox_url() {
+    echo "s3://${S3_BUCKET}/${S3_PREFIX}/mailbox/$1"
+}
+
+backend_mailbox_put() {
+    local src="$1" rel="$2"
+    check_aws_cli
+    check_s3_configured
+    # A PUT is atomic in S3: a lister sees the whole object or nothing.
+    aws_s3 cp "$src" "$(s3_mailbox_url "$rel")" -- --only-show-errors
+}
+
+backend_mailbox_get() {
+    local rel="$1" dest="$2"
+    check_aws_cli
+    aws_s3 cp "$(s3_mailbox_url "$rel")" "$dest" -- --only-show-errors
+}
+
+# `aws s3 ls` on a prefix with no keys is not a reliable reachability signal
+# (CLI versions differ on its exit status), so reachability is decided by the
+# same bucket probe check_s3_configured uses, and an empty or failed listing
+# after that is simply "nothing waiting".
+backend_mailbox_list() {
+    local recipient="$1"
+    command -v aws >/dev/null 2>&1 || return 1
+    aws_s3 ls "s3://${S3_BUCKET}" >/dev/null 2>&1 || return 1
+    local listing
+    listing=$(aws_s3 ls "$(s3_mailbox_url "$recipient/")" 2>/dev/null || true)
+    printf '%s\n' "$listing" \
+        | awk '$4 ~ /\.kcsession\.json\.gz$/ {print $4, $3}' \
+        | LC_ALL=C sort
+}
+
+backend_mailbox_delete() {
+    local rel="$1"
+    aws_s3 rm "$(s3_mailbox_url "$rel")" -- --only-show-errors
 }

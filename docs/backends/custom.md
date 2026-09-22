@@ -95,6 +95,63 @@ See `backends/local.sh`, `backends/gdrive.sh`, `backends/s3.sh`, and
 `backends/rsync.sh` for four different transports implementing the same
 contract, and `tests/test_backend_local_list.sh` for a test of it.
 
+### Keep `mailbox/` out of push and pull
+
+The same backend root also holds the session mailbox (`send-session` /
+`inbox`, see the README) under `mailbox/`, beside `bundles/`. It is not sync
+state. Your `backend_push` must never delete it, even when it mirrors with
+delete, and your `backend_pull` must not download it. With rsync that means
+`--exclude=/mailbox/`, with `aws s3 sync` `--exclude "mailbox/*"`, and with
+rclone `--exclude "/mailbox/**"`. An excluded path is also protected from
+`--delete` in all three tools. If you skip this, the next `sync` deletes every
+session waiting in the mailbox.
+
+## Mailbox functions
+
+Four more functions give `send-session` and `inbox` a mailbox. They are
+optional: a backend without them still syncs, and the two commands say the
+backend has no mailbox support. `rel` is always `<recipient>/<file>`, relative
+to `<backend root>/mailbox/`. kirocrew-sync.sh only passes sanitized names
+(`[A-Za-z0-9._-]`, one path segment each), so quoting them for a remote shell
+is safe.
+
+```bash
+backend_mailbox_put() {    # $1 local file, $2 rel
+    # Upload. Create <recipient>/ if needed. Make the file appear whole:
+    # upload under a hidden or temporary name and rename, unless the store's
+    # PUT is already atomic (S3 and Drive are).
+}
+
+backend_mailbox_get() {    # $1 rel, $2 local destination file
+    # Download one file.
+}
+
+backend_mailbox_list() {   # $1 recipient
+    # One line per "*.kcsession.json.gz" file under mailbox/<recipient>/:
+    # "<file name> <size in bytes>", sorted (LC_ALL=C sort). Print nothing and
+    # return 0 when the folder does not exist yet. Return non-zero only when
+    # the backend itself cannot be reached.
+}
+
+backend_mailbox_delete() { # $1 rel
+    # Remove one file. Called after a bundle addressed to this machine is
+    # installed or discarded. Never called for mailbox/all/ (broadcasts).
+}
+```
+
+Unlike `backend_list`, these run interactively, so they may call your
+`check_*_configured` helpers and print setup instructions. `backend_mailbox_list`
+runs inside a command substitution, so keep log output off its stdout.
+
+What goes through these functions is sensitive. A bundle holds a whole chat
+transcript and, if the sender asked and KiroCrew permits it, Layer B: the
+byte-exact, unredacted model context. It sits on the backend unencrypted until
+the recipient installs or discards it.
+
+See the four bundled backends for implementations, and
+`tests/test_session_mailbox.sh` (local) and `tests/test_backend_s3_endpoint.sh`
+(S3 command lines) for tests.
+
 ## Configuration
 
 Follow the pattern the bundled backends use, so settings can come from

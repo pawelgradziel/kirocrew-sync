@@ -15,6 +15,7 @@ from . import paths as pathmod
 from . import policy as pol
 from .canon import BlobStore
 from . import dbio, files
+from . import mailbox
 
 
 def _repo_paths(repo):
@@ -464,6 +465,8 @@ def build_parser():
         help="exit 0 if this scope already has synced state (import's existing-state gate)"),
                     need_repo=False)
     p.set_defaults(func=cmd_seed_has_data)
+
+    mailbox.add_parsers(sub, default_dir)
 
     return parser
 

@@ -51,3 +51,9 @@ export KIROCREW_PATH_MAP="$KIROCREW_DIR/path_map.conf"
 
 # Local directory settings (edit backends/local.sh) — Dropbox, Syncthing, NAS, USB
 # - LOCAL_SYNC_DIR: shared folder path (default: $HOME/Dropbox/KiroCrew-Sync)
+
+# Session mailbox (send-session / inbox), see README
+# - MAILBOX_NAME: this machine's address; others send with --to <name>
+#   (default: the machine id in $KIROCREW_DIR/.machine_id)
+# - KIROCREW_PORT: port of the running KiroCrew gateway, if not the default
+# export MAILBOX_NAME="laptop"

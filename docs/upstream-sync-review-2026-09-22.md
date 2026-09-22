@@ -100,7 +100,25 @@ All of them are in `session_transfer.py`:
   only while KiroCrew is stopped, which the existing running-guard already
   requires.
 
-### Reuse option (not built): sync as a mailbox for session bundles
+### Reuse option: sync as a mailbox for session bundles
+
+**Update: built** as `send-session` / `inbox`. See the README section "Sending
+one session to another machine" and `tests/test_session_mailbox.sh`. Three
+corrections to the note below, found while building it:
+
+- The file export blanks `origin`, so a file import lands directly under
+  `Imported`. The "from \<sender\>" filing only happens because `send-session`
+  writes the sender's mailbox address into `origin`, a top-level unsigned
+  field.
+- Import creates a new slot key and sid, and the bundle carries no stable
+  source-session id. Dedup is therefore a SHA-256 of the file in a local,
+  unsynced ledger.
+- The installed copy's transcript (`sessions/<new key>.jsonl`) is in `ALLOW`.
+  Personal sync carries it back, so the sender ends up with the original and
+  the copy. The mailbox is most useful between machines that do not share a
+  personal backend, or to resume with Layer B.
+
+The original note:
 
 Upstream says the file route exists because a tunnel needs both machines up at
 once (§14.7). kirocrew-sync backends (S3/R2, rsync) already provide the

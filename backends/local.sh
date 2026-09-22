@@ -29,8 +29,11 @@ backend_push() {
     check_local_configured
     mkdir -p "$LOCAL_SYNC_DIR"
 
+    # mailbox/ is the session mailbox (send-session / inbox), not sync
+    # state: --delete must never reach it. The cp fallback below only
+    # replaces bundles/, so it leaves mailbox/ alone already.
     if command -v rsync &> /dev/null; then
-        rsync -a --delete "$bundle_dir/" "$LOCAL_SYNC_DIR/"
+        rsync -a --delete --exclude=/mailbox/ "$bundle_dir/" "$LOCAL_SYNC_DIR/"
     else
         rm -rf "${LOCAL_SYNC_DIR:?}/bundles"
         cp -R "$bundle_dir/." "$LOCAL_SYNC_DIR/"
@@ -45,10 +48,19 @@ backend_pull() {
         return 1
     fi
     mkdir -p "$bundle_dir"
+    # Never pull mailbox/: session bundles are not sync state, and a pulled
+    # copy would be re-published by push, resurrecting bundles an inbox has
+    # already removed.
     if command -v rsync &> /dev/null; then
-        rsync -a "$LOCAL_SYNC_DIR/" "$bundle_dir/"
+        rsync -a --exclude=/mailbox/ "$LOCAL_SYNC_DIR/" "$bundle_dir/"
     else
-        cp -R "$LOCAL_SYNC_DIR/." "$bundle_dir/"
+        local entry
+        shopt -s nullglob dotglob
+        for entry in "$LOCAL_SYNC_DIR"/*; do
+            [ "$(basename "$entry")" = "mailbox" ] && continue
+            cp -R "$entry" "$bundle_dir/"
+        done
+        shopt -u nullglob dotglob
     fi
 }
 
@@ -127,4 +139,54 @@ backend_status() {
     else
         log_warn "Not created yet (nothing published)"
     fi
+}
+
+# --------------------------------------------------------------------------
+# Session mailbox (send-session / inbox). The contract every backend shares
+# is in docs/backends/custom.md, "Mailbox functions". Paths are relative to
+# $LOCAL_SYNC_DIR/mailbox and look like "<recipient>/<file>".
+
+local_mailbox_root() {
+    echo "$LOCAL_SYNC_DIR/mailbox"
+}
+
+backend_mailbox_put() {
+    local src="$1" rel="$2"
+    check_local_configured
+    local dest tmp
+    dest="$(local_mailbox_root)/$rel"
+    mkdir -p "$(dirname "$dest")"
+    # Copy under a hidden name, then rename: another machine listing this
+    # folder (through Dropbox, a NAS) never sees half a file under its name.
+    tmp="$(dirname "$dest")/.$(basename "$dest").tmp"
+    cp "$src" "$tmp" && mv -f "$tmp" "$dest"
+}
+
+backend_mailbox_get() {
+    local rel="$1" dest="$2"
+    cp "$(local_mailbox_root)/$rel" "$dest"
+}
+
+backend_mailbox_list() {
+    local recipient="$1"
+    [ -d "$(dirname "$LOCAL_SYNC_DIR")" ] || return 1
+    local dir
+    dir="$(local_mailbox_root)/$recipient"
+    [ -d "$dir" ] || return 0
+    local f size
+    shopt -s nullglob
+    for f in "$dir"/*.kcsession.json.gz; do
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            size=$(stat -f %z "$f" 2>/dev/null || echo 0)
+        else
+            size=$(stat -c %s "$f" 2>/dev/null || echo 0)
+        fi
+        echo "$(basename "$f") $size"
+    done | LC_ALL=C sort
+    shopt -u nullglob
+}
+
+backend_mailbox_delete() {
+    local rel="$1"
+    rm -f "$(local_mailbox_root)/$rel"
 }

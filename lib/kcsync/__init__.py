@@ -6,7 +6,9 @@ Responsibilities are split deliberately:
                     and perform row-level three-way merges
   * kirocrew-sync.sh - git orchestration and backend transport
 
-Nothing here talks to a network or to a storage backend.
+Nothing here talks to a storage backend. The one network peer is the local
+KiroCrew gateway on this machine, which mailbox.py calls for session
+export/import (send-session / inbox).
 """
 
 FORMAT_VERSION = 1

@@ -78,6 +78,7 @@ backend_push() {
     # Using copy instead of sync to preserve local if remote is empty
     if rclone copy "$bundle_dir" "${GDRIVE_REMOTE_NAME}:${GDRIVE_SYNC_DIR}" \
         --progress \
+        --exclude "/mailbox/**" \
         --checkers 8 \
         --transfers 4 \
         --delete-during; then
@@ -106,6 +107,7 @@ backend_pull() {
     # Download from Google Drive
     if rclone copy "${GDRIVE_REMOTE_NAME}:${GDRIVE_SYNC_DIR}" "$bundle_dir" \
         --progress \
+        --exclude "/mailbox/**" \
         --checkers 8 \
         --transfers 4; then
         log_success "Downloaded from Google Drive: ${GDRIVE_SYNC_DIR}/"
@@ -187,4 +189,44 @@ backend_status() {
     else
         log_warn "Google Drive not configured"
     fi
+}
+
+# --------------------------------------------------------------------------
+# Session mailbox (send-session / inbox). Contract: docs/backends/custom.md,
+# "Mailbox functions". Files live under $GDRIVE_SYNC_DIR/mailbox/ and the
+# relative path is "<recipient>/<file>". push/pull exclude /mailbox/**, so
+# sync never carries or deletes these.
+
+gdrive_mailbox_path() {
+    echo "${GDRIVE_REMOTE_NAME}:${GDRIVE_SYNC_DIR}/mailbox/$1"
+}
+
+backend_mailbox_put() {
+    local src="$1" rel="$2"
+    check_rclone
+    check_gdrive_configured
+    rclone copyto "$src" "$(gdrive_mailbox_path "$rel")"
+}
+
+backend_mailbox_get() {
+    local rel="$1" dest="$2"
+    check_rclone
+    rclone copyto "$(gdrive_mailbox_path "$rel")" "$dest"
+}
+
+backend_mailbox_list() {
+    local recipient="$1"
+    command -v rclone >/dev/null 2>&1 || return 1
+    # Reachability first, as backend_list does: lsf fails both for a missing
+    # folder (nothing sent yet) and for a dead remote.
+    rclone lsd "${GDRIVE_REMOTE_NAME}:" >/dev/null 2>&1 || return 1
+    rclone lsf "$(gdrive_mailbox_path "$recipient")" \
+        --files-only --include '*.kcsession.json.gz' \
+        --format "ps" --separator " " 2>/dev/null | LC_ALL=C sort
+    return 0
+}
+
+backend_mailbox_delete() {
+    local rel="$1"
+    rclone deletefile "$(gdrive_mailbox_path "$rel")"
 }

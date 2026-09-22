@@ -368,6 +368,85 @@ Both commands respect `--team`/`--scope`, the same as `sync`: an archive
 exported at one scope refuses to import into the other, so a personal export
 can never seed a colleague's team library by accident.
 
+### Sending one session to another machine
+
+`send-session` and `inbox` use the backend as a mailbox for single chat
+sessions. They move KiroCrew's own session export file, so the receiving
+KiroCrew does the validation, size limits, credential redaction and filing.
+Both commands talk to the **running** KiroCrew. They never read or write
+KiroCrew's data directories.
+
+```bash
+# On the sending machine, with KiroCrew running
+./kirocrew-sync.sh send-session slot-3 --to desktop   # or dashboard:slot-3
+
+# On the receiving machine, with KiroCrew running
+./kirocrew-sync.sh inbox                 # list what is waiting (no gateway needed)
+./kirocrew-sync.sh inbox --install       # install everything new
+./kirocrew-sync.sh inbox --install <name>
+./kirocrew-sync.sh inbox --discard <name>
+```
+
+- **Addresses.** A machine's address is `MAILBOX_NAME` from `config.sh`, or
+  its machine id if that is not set. `--to all`, the default in personal
+  scope, reaches every machine on the backend except the sender. Each
+  address is a folder under `<backend root>/mailbox/`, next to `bundles/`.
+- **What moves.** `send-session` calls `GET /api/chat/slots/{slot}/export` and
+  uploads the gzipped bundle. The slot has to be loaded in KiroCrew (open as a
+  tab), or the export returns 404. Incognito and temporary sessions cannot be
+  exported. `inbox --install` posts the file unchanged to
+  `POST /api/chat/slots/import`, which creates a new session under
+  **Imported / from \<sender\>**. The sender's name is there because
+  `send-session` writes its mailbox address into the bundle's `origin` field.
+  KiroCrew's own file export leaves that field empty.
+- **Installed once.** Import never overwrites. Every import creates a new
+  session, so installing a bundle twice gives you a duplicate. `inbox` keeps a
+  local record in `~/.kiro/crew/.sync/mailbox-state.json`, which is never
+  synced. The record is keyed by a SHA-256 of the file, so the same bytes
+  arriving under another name are skipped as well. A bundle sent to this
+  machine is deleted from the backend once it is installed or discarded. A
+  bundle sent to `all` stays on the backend for your other machines.
+  `inbox --install <name> --force` installs a bundle again anyway.
+- **It never enters sync.** Every backend's push and pull exclude `mailbox/`.
+  Mailbox files never reach the sync repo, and a sync's mirror-with-delete
+  never removes them.
+- **Personal sync brings the copy back.** An installed session is an ordinary
+  session. Its transcript is `sessions/<new key>.jsonl`, which personal sync
+  carries to every machine, including the sender, which then has both the
+  original and the copy. Between machines that already share a personal sync
+  backend, `sync` alone already makes the transcript readable everywhere.
+  `send-session` is most useful where that is not the case: a machine on a
+  different backend, a colleague, or a session you want to **resume** on the
+  other side, which needs Layer B (below).
+- **Layer B.** `--include-layer-b` asks KiroCrew to include the session's
+  kiro-cli context, so the copy resumes through `session/load` instead of
+  replaying a history prefix. KiroCrew only does this when
+  `dashboard.export_include_layer_b` is `true` in its `config.json`. Otherwise
+  it withholds Layer B and `send-session` says so. Layer B is byte-exact and
+  **unredacted**, because its thinking-block signatures break if any byte
+  changes.
+- **Team scope is explicit.** Team sync never publishes transcripts, so with
+  `--team` (or `SYNC_SCOPE=team`), `send-session` requires one named
+  recipient (`--to <name>`, not `all`) and `--share-transcript` to confirm.
+  The bundle holds the full visible conversation. It sits unencrypted on the
+  team backend, readable by anyone with access, until the colleague installs
+  or discards it.
+
+**Authentication.** Both commands authenticate the way KiroCrew's own local
+tools and `install-app.sh` do. They read the gateway secret from
+`~/.kiro/crew/run/gateway-<port>.secret`, falling back to
+`~/.kiro/crew/.local_secret`. They mint a 10-minute dashboard token with
+`GET /api/token/local` (`X-Local-Secret` header, loopback only), then call the
+two routes with `?token=`. That token is an owner token with no app scope, so
+it can export any loaded slot, may carry Layer B, and gets the "from
+\<sender\>" filing. An app-scoped token would get none of those. The
+dashboard's unix socket (`~/.kiro/crew/dashboard-<port>.sock`) is used when it
+exists, and loopback TCP otherwise. The port comes from `KIROCREW_PORT`, then
+`KIROCREW_BOUND_PORT`, then a port written in `dashboard.url` in KiroCrew's
+`config.json`, then the only `run/gateway-<port>.bin` marker, then 5476. If
+KiroCrew is not running, or no secret can be read, or the gateway refuses the
+token, the command says which one happened and changes nothing.
+
 ### Switching Between Backends
 
 ```bash
@@ -706,6 +785,7 @@ For the other backends, see the troubleshooting section of
 ./tests/test_config_precedence.sh     # environment vs config.sh vs defaults
 ./tests/test_backend_local_list.sh    # the remote-state fingerprint contract
 ./tests/test_backend_s3_endpoint.sh   # S3 command lines, AWS and S3-compatible
+./tests/test_session_mailbox.sh       # send-session / inbox against a fake gateway
 ./tests/test_daemon.sh                # the polling daemon
 ```
 

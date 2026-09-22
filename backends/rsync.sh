@@ -46,9 +46,12 @@ backend_push() {
     
     log_info "Syncing to remote host..."
     
+    # mailbox/ holds send-session bundles, not sync state; --delete must
+    # never reach it (an excluded path is also protected from deletion).
     if rsync -avz --delete \
         --exclude="*.lock" \
         --exclude="*.tmp" \
+        --exclude="/mailbox/" \
         "$bundle_dir/" "${RSYNC_HOST}:${RSYNC_PATH}/"; then
         log_success "Synced to ${RSYNC_HOST}:${RSYNC_PATH}/"
     else
@@ -68,6 +71,7 @@ backend_pull() {
     if rsync -avz \
         --exclude="*.lock" \
         --exclude="*.tmp" \
+        --exclude="/mailbox/" \
         "${RSYNC_HOST}:${RSYNC_PATH}/" "$bundle_dir/"; then
         log_success "Synced from ${RSYNC_HOST}:${RSYNC_PATH}/"
     else
@@ -156,4 +160,65 @@ backend_status() {
     else
         log_warn "Remote host not accessible"
     fi
+}
+
+# --------------------------------------------------------------------------
+# Session mailbox (send-session / inbox). Contract: docs/backends/custom.md,
+# "Mailbox functions". Paths are relative to $RSYNC_PATH/mailbox and look like
+# "<recipient>/<file>"; kirocrew-sync.sh only ever passes sanitized names
+# ([A-Za-z0-9._-]), so single-quoting them for the remote shell is safe.
+
+rsync_mailbox_root() {
+    echo "$RSYNC_PATH/mailbox"
+}
+
+backend_mailbox_put() {
+    local src="$1" rel="$2"
+    check_rsync
+    check_rsync_configured
+    local host="${RSYNC_HOST%%:*}"
+    local dest dir tmp
+    dest="$(rsync_mailbox_root)/$rel"
+    dir="$(dirname "$dest")"
+    tmp="$dir/.$(basename "$dest").tmp"
+    # Upload under a hidden name and rename on the remote, so a concurrent
+    # inbox listing never picks up half a file.
+    ssh "$host" "mkdir -p '$dir'" &&
+        rsync -az "$src" "${RSYNC_HOST}:${tmp}" &&
+        ssh "$host" "mv -f '$tmp' '$dest'"
+}
+
+backend_mailbox_get() {
+    local rel="$1" dest="$2"
+    check_rsync
+    rsync -az "${RSYNC_HOST}:$(rsync_mailbox_root)/$rel" "$dest"
+}
+
+backend_mailbox_list() {
+    local recipient="$1"
+    command -v ssh >/dev/null 2>&1 || return 1
+    local host="${RSYNC_HOST%%:*}"
+    local dir
+    dir="$(rsync_mailbox_root)/$recipient"
+    local output
+    output=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" \
+        "if [ -d '$dir' ]; then \
+            find '$dir' -maxdepth 1 -name '*.kcsession.json.gz' \
+                -exec stat -c '%n %s' {} \; ; \
+        fi; \
+        [ -d '$RSYNC_PATH' ] && echo REMOTE_OK" 2>/dev/null) || return 1
+    case "$output" in
+        *REMOTE_OK) ;;
+        *) return 1 ;;
+    esac
+    printf '%s\n' "$output" | grep -v '^REMOTE_OK$' | while read -r path size; do
+        [ -n "$path" ] || continue
+        echo "$(basename "$path") $size"
+    done | LC_ALL=C sort
+}
+
+backend_mailbox_delete() {
+    local rel="$1"
+    local host="${RSYNC_HOST%%:*}"
+    ssh "$host" "rm -f '$(rsync_mailbox_root)/$rel'"
 }

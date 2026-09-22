@@ -75,6 +75,13 @@ constraints (byte-exact files, machine-specific envelope fields, on-loop map
 join) and a bundle-based alternative to a second sync root are in
 [docs/upstream-sync-review-2026-09-22.md](docs/upstream-sync-review-2026-09-22.md).
 
+**Update 2026-09-22 (later)** — The bundle-based route now exists for one
+session at a time: `send-session --include-layer-b` / `inbox --install` (see
+the README). It moves Layer B through upstream's export and import, so
+upstream does the envelope rewrite and the map join. It is not continuous
+sync: every send makes a new copy on the other side. A second sync root is
+still the only way to keep the CLI half of *every* session in step.
+
 **Why it is not a one-line fix**
 
 `ALLOW` is relative to `KIROCREW_DIR`, so there is no glob that reaches
