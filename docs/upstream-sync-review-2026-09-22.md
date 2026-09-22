@@ -18,7 +18,7 @@ single-operator tool.
 |---|---|---|---|
 | Export one session to a file | #9685 | 2026-09-10 | `GET /api/chat/slots/{slot}/export` downloads `<title>-<stamp>.kcsession.json.gz`. Refuses incognito and temporary sessions. |
 | Import a session from a file | #11315 | 2026-09-17 | `POST /api/chat/slots/import` takes that file (or the plain-JSON tunnel bundle; it sniffs gzip from the first two bytes). New sidebar row "Import a session from a file". |
-| Export can carry Layer B | #11297 | 2026-09-18 | `dashboard.export_include_layer_b` (off by default) puts the kiro-cli context window into the file, so an import resumes via `session/load` instead of replaying an ~8K prefix. |
+| Export can carry Layer B | #11297 | 2026-09-18 | `dashboard.export_include_layer_b` (off by default) puts the kiro-cli context window into the file, so an import resumes via `session/load` instead of replaying a text prefix of the history (80K chars, `context._REPLAY_BUDGET_CHARS`; upstream docstrings still say ~8K). |
 | Scrub provenance from exports | #11607 | 2026-09-18 | Host and login details are removed from the downloadable bundle. |
 | Arrival provenance filing | RFC #12189, #12196 (closes #11468) | 2026-09-21 | Every arriving session, from a file or pushed from a peer, is filed under `Imported / from <sender>`. |
 
@@ -86,19 +86,26 @@ All of them are in `session_transfer.py`:
 - **Byte-exact or broken.** The CLI envelope carries thinking blocks with a
   provider signature over their content. Rewriting any covered byte makes
   `session/load` succeed and the *next turn* fail. Upstream measured that a
-  redaction pass broke a signature in 41% of 704 real sessions. So the CLI
-  `.jsonl` must never go through `merge=union` or any line merge. Two machines
-  appending to the same sid is a conflict to keep as two copies, not something
-  to merge.
+  redaction pass broke a signature in 41% of 704 real sessions. The signed
+  content sits in the envelope `.json` (`session_state.conversation_metadata`),
+  not only the `.jsonl`. So neither file may go through `merge=union`, the
+  `kcsync-json` merge, or `strip_secrets`. What must be preserved is the signed
+  content, not the file bytes: upstream itself re-serialises the envelope.
+  Two machines appending to the same sid is a conflict to keep as two copies,
+  not something to merge.
 - **Machine-specific fields.** `_rewrite_layer_b_envelope` lists them:
   `session_id`, `cwd`, and
-  `session_state.permissions.filesystem.allowed_{read,write}_paths`. `cwd` and
-  the path lists are exactly what ADR 0001 path portability could translate.
+  `session_state.permissions.filesystem.allowed_{read,write}_paths`. Upstream
+  deliberately *clears* `cwd` and the path lists rather than translating them,
+  matching its choice to drop `project`. Map entries carry a machine-specific
+  `cwd` too.
 - **The join is on-loop.** Upstream writes the two files off-loop and does the
-  map join on the gateway's event loop. The map is an unlocked dict saved as a
-  whole file, so any other writer loses entries. An offline sync writer is safe
-  only while KiroCrew is stopped, which the existing running-guard already
-  requires.
+  map join on the gateway's event loop. The map now has a process-level lock
+  (`_MAP_LOCK`), but its threading contract still requires every write to go
+  through the live map: a second process's whole-file save loses entries. Our
+  running-guard (`check_kirocrew_running`) does **not** protect against this.
+  It lets pack run while KiroCrew is up but idle, judged only by recently
+  changed `*.db` files.
 
 ### Reuse option (not built): sync as a mailbox for session bundles
 
@@ -107,11 +114,16 @@ once (§14.7). kirocrew-sync backends (S3/R2, rsync) already provide the
 asynchronous mailbox that route is missing. A thin `send-session`/`inbox`
 command could put `.kcsession.json.gz` files on the backend and install them on
 the other side with `POST /api/chat/slots/import`. That gets upstream's
-validation, redaction, size caps, and `Imported / from <sender>` filing for
-free, and would work for sending a session to a colleague over a team backend.
-This is the supported way to move a *resumable* session, as opposed to the
-raw-file approach in the TODO. Worth considering before building a second sync
-root.
+validation, redaction, size caps and `Imported` filing. The file export sets
+`origin=""`, so file imports land under `Imported` directly, not
+`from <sender>`. Limits: exporting Layer B needs the owner dashboard, and an app
+token gets neither Layer B nor slots it does not own
+(`is_owner_dashboard_request`). Each import is a new session with no stable
+source id, so the receiver needs its own dedup ledger. The copy's transcript is
+then synced back to the sender like any other transcript. Sending transcripts
+to a colleague conflicts with ADR 0002's team scope. The decision is in
+[ADR 0003](adr/0003-kiro-cli-session-half.md): `sync` does not carry the CLI
+half, and a separate, explicit personal-scope `send-session`/`inbox` verb does.
 
 ### Found, not fixed: member memory stores do not sync
 
