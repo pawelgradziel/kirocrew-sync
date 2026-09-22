@@ -209,9 +209,9 @@ learned them.
   vector file, so the root `memory.db` also has `memory_revisions` (an
   AUTOINCREMENT id) and `memory_record_meta`. `OVERRIDES["memory"]` does not
   list them yet. `memory_revisions` is therefore inferred as LWW keyed on the
-  machine-local id, so revision 5 on two machines can collide. The fix is to
-  copy the two store overrides into `OVERRIDES["memory"]`. It is not in this
-  change.
+  machine-local id, so revision 5 on two machines can collide. **Fixed** by
+  copying the two store overrides into `OVERRIDES["memory"]`; covered by
+  `tests/run_tests.sh` scenario 9b.
 
 ## Recommendation
 

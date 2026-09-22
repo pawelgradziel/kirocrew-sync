@@ -107,6 +107,20 @@ OVERRIDES = {
             identity=("created_at", "event_type", "memory_type", "memory_key", "source"),
             renumber="id",
             note="append-only event log; ids are machine-local"),
+        # Revision metadata upstream adds to memory.db as well as to member
+        # stores (memory_record_metadata.ensure_schema, called from
+        # vector_memory for both lineages). Same rules as the member-store
+        # copies below: the journal's AUTOINCREMENT id is machine-relative, so
+        # union on the natural key and renumber, or revision 12 from two
+        # machines overwrites one of them. Never shared: before_json and
+        # after_json quote the memories.
+        "memory_revisions": TablePolicy(
+            UNION,
+            identity=("created_at", "record_id", "revision", "base_revision",
+                      "status", "operation", "source"),
+            renumber="id",
+            note="per-record revision journal; ids are machine-local"),
+        "memory_record_meta": TablePolicy(LWW, ts_col="updated_at"),
         # Carries embedding_space_sig, which the compatibility gate compares.
         "memory_meta": TablePolicy(LWW, ts_col="updated_at", shared=True),
         "schema_version": TablePolicy(UNION, shared=True),

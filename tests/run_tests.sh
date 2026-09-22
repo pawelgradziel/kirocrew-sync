@@ -335,6 +335,42 @@ NEW_COMMITS="$(git -C "$REPO" log --oneline "$(git -C "$REPO" rev-list -n1 --ski
 CLEAN="$(git -C "$REPO" status --porcelain | wc -l | tr -d ' ')"
 assert_eq "working tree clean after idle sync" "$CLEAN" "0"
 
+head_ "Scenario 9b: memory.db revision journals from two machines both survive"
+fresh_pair
+add_revision() {
+    python3 - "$WORK/$1/memory.db" "$2" "$3" <<'PY2'
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.execute("""CREATE TABLE IF NOT EXISTS memory_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, record_id TEXT NOT NULL,
+    revision INTEGER NOT NULL, base_revision INTEGER NOT NULL,
+    status TEXT NOT NULL, operation TEXT NOT NULL, source TEXT NOT NULL,
+    before_json TEXT, after_json TEXT, metadata_json TEXT NOT NULL,
+    created_at TEXT NOT NULL)""")
+db.execute("INSERT INTO memory_revisions (record_id, revision, base_revision,"
+           " status, operation, source, metadata_json, created_at)"
+           " VALUES (?, 1, 0, 'accepted', 'create', 'test', '{}', ?)",
+           (sys.argv[2], sys.argv[3]))
+db.commit()
+PY2
+}
+revisions() {
+    python3 - "$WORK/$1/memory.db" <<'PY2'
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+print(";".join("%d:%s" % r for r in
+      db.execute("SELECT id, record_id FROM memory_revisions ORDER BY id")))
+PY2
+}
+# Both machines write revision id 1 for different records.
+add_revision a rec-a 2026-03-01T10:00:00+00:00
+add_revision b rec-b 2026-03-01T11:00:00+00:00
+sync_machine a sync > /dev/null
+sync_machine b sync > /dev/null
+sync_machine a sync > /dev/null
+assert_eq "A keeps both revisions, renumbered" "1:rec-a;2:rec-b" "$(revisions a)"
+assert_eq "B keeps both revisions, renumbered" "1:rec-a;2:rec-b" "$(revisions b)"
+
 head_ "Scenario 10: a mismatched machine is quarantined, not fatal"
 rm -rf "$WORK/remote"
 setup_machine a sig-model-one
