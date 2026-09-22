@@ -21,11 +21,23 @@ from .canon import dumps_pretty
 # directories. So "sessions/*.jsonl" is top-level only; use ** for recursion.
 ALLOW = [
     "config.json",
+    # The two one-shot ledgers KiroCrew keeps beside config.json. Each records
+    # "this config document already went through a migration", and the load
+    # path consults them before deleting keys (upstream config/loader.py
+    # load(): strips a stored `connections_ui: false` unless
+    # connections_ui_migrated.json exists; config/superseded_defaults.py
+    # auto_adoptable()/record_adoptions(): removes a stored old default unless
+    # superseded_acked.json lists it as adopted or acknowledged). Left behind,
+    # a machine that never saw the ledger deleted a value the other machine's
+    # operator had deliberately kept, and the merge carried the deletion back
+    # to that machine too. They describe the synced document, so they travel
+    # with it.
+    "connections_ui_migrated.json",
+    "superseded_acked.json",
     "tags.json",
     "tag_boards.json",
     "admission_policy.json",
     "model_windows.json",
-    "autonudge.json",
     "hooks.json",
     "sessions/*.jsonl",
     # KiroCrew rolls the older turns of a long conversation out of the live
@@ -69,8 +81,21 @@ TEAM_ALLOW = [
 # mappings. Listed here rather than just dropped from ALLOW so a later ALLOW
 # glob cannot reintroduce it; pack never deletes local files, so every machine
 # keeps its own copy. See docs/upstream-sync-review-2026-09-22.md.
+#
+# autonudge.json is out for the crons.json reason (see above) and the
+# session_map.json reason together. It holds live self-prompting loops bound
+# to chat slots, and every gateway re-arms the loops it finds at startup
+# (upstream autonudge.py), so a synced copy made every machine fire the same
+# nudges into its own copy of the conversation. And AutoNudgeService._load() rewrites the
+# store from host state: rows whose addressing fields fail this host's
+# credential policy move into autonudge.quarantine.json (never synced), a loop
+# interrupted mid-delivery is stopped, and repair_sentinel_path() re-homes or
+# drops stop_sentinel_path against the local data home. "loops" is one list,
+# which merge_json treats as a single value, so that rewrite beat the untouched
+# copy on the machine that owned the loops.
 DENY = [
     "session_map.json",
+    "autonudge.json",
     "**/.git/**", "**/.git",
     "**/*.lock", "**/*.tmp", "**/*.bak", "**/*~", "**/*.sig",
     "**/*.key", "**/*.pem", "**/*.credentials", "**/*.token",
@@ -92,6 +117,24 @@ DENY = [
 SECRET_KEY_RE = re.compile(
     r"(token|secret|password|passwd|api_?key|client_?id|access_?key|"
     r"private_?key|credential|bearer|webhook)", re.I)
+
+# JSON leaves that describe this machine rather than the user's settings.
+# Handled like the secrets above: left out of the synced copy, and on pack the
+# local value (or its absence) is put back, whatever the merged copy says.
+#
+# memory.embed_model_stamp is (st_dev, st_ino, size, mtime_ns, ctime_ns) of the
+# local custom embedding model file, and embed_model_legacy_ids names the
+# vector space this machine's own vectors were built in before the file was
+# recorded. Upstream embeddings._verify_custom_model() rewrites the stamp when
+# it does not match the local file, and can pop the legacy ids. Synced, each
+# machine re-hashed the model weights after every sync and wrote its own stamp
+# back. Worse, on a machine whose vectors predate the recorded model file, the
+# reconcile in embeddings.py accepts those vectors only while the stored stamp
+# matches the local file; another machine's stamp fails that check and starts
+# an embedding-space change, a full re-embed on a machine that changed nothing.
+LOCAL_ONLY_KEYS = {
+    "config.json": ("memory.embed_model_stamp", "memory.embed_model_legacy_ids"),
+}
 
 
 def _glob_match(posix, pattern):
@@ -229,6 +272,44 @@ def _graft_local_secrets(merged, local):
     return merged
 
 
+def _parent_of(value, dotted):
+    """(dict holding the leaf, leaf name) for *dotted* in *value*, or (None, leaf)."""
+    *parents, leaf = dotted.split(".")
+    node = value
+    for part in parents:
+        node = node.get(part) if isinstance(node, dict) else None
+    return (node if isinstance(node, dict) else None), leaf
+
+
+def strip_local_only(rel_path, value):
+    """Drop this file's LOCAL_ONLY_KEYS from *value* in place."""
+    for dotted in LOCAL_ONLY_KEYS.get(Path(rel_path).as_posix(), ()):
+        parent, leaf = _parent_of(value, dotted)
+        if parent is not None:
+            parent.pop(leaf, None)
+    return value
+
+
+def _graft_local_only(rel_path, merged, local):
+    """Make each LOCAL_ONLY_KEYS leaf in *merged* match the local file.
+
+    The local value wins, and a leaf the local file lacks is removed, so a
+    repo written by a build that still synced these keys cannot plant another
+    machine's value here. A parent the merged copy no longer has is not
+    recreated: the section it belonged to was deleted on purpose.
+    """
+    for dotted in LOCAL_ONLY_KEYS.get(Path(rel_path).as_posix(), ()):
+        dest, leaf = _parent_of(merged, dotted)
+        if dest is None:
+            continue
+        src, _ = _parent_of(local, dotted)
+        if src is not None and leaf in src:
+            dest[leaf] = src[leaf]
+        else:
+            dest.pop(leaf, None)
+    return merged
+
+
 def unpack_files(kirocrew_dir, out_dir, log=print, scope=pol.PERSONAL):
     """Copy allowlisted files into the repo, normalizing JSON and redacting.
 
@@ -253,6 +334,7 @@ def unpack_files(kirocrew_dir, out_dir, log=print, scope=pol.PERSONAL):
                 written.add(rel)
                 continue
             clean, removed = strip_secrets(data)
+            strip_local_only(rel, clean)
             if removed:
                 redacted.extend("%s:%s" % (rel, k) for k in sorted(removed))
             # Rewritten pretty and key-sorted so git can diff it line by line.
@@ -308,6 +390,7 @@ def pack_files(in_dir, kirocrew_dir, dry_run=False, log=print,
                 except ValueError:
                     local = {}
             merged = _graft_local_secrets(incoming, local)
+            merged = _graft_local_only(rel, merged, local)
             if not dry_run:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 _atomic_write(dest, dumps_pretty(merged))

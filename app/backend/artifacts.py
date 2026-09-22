@@ -321,10 +321,18 @@ TABLE_TO_CHANGE_TYPE: Dict[str, str] = {
 # JSON-file conflicts (merge.py driver_json(), kind="value") record the
 # relative path as `table` -- see files.py's ALLOW list for what each of
 # these actually is.
+#
+# session_map.json and autonudge.json no longer sync (files.py DENY: KiroCrew
+# rewrites both from machine-local state, and the merge carried that rewrite
+# back to the machine that owned the entries), so no new conflict can name
+# them. They stay listed on purpose. conflicts.jsonl is only truncated when the
+# next sync starts, so the log left by the last run before the upgrade can
+# still hold one of them, and dropping the name here would silently drop that
+# record from the history instead of filing it under "config".
 _CONFIG_FILE_NAMES = frozenset({
     "config.json", "tags.json", "tag_boards.json", "session_map.json",
     "admission_policy.json", "model_windows.json", "autonudge.json",
-    "hooks.json",
+    "hooks.json", "connections_ui_migrated.json", "superseded_acked.json",
 })
 
 

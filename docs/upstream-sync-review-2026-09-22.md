@@ -129,3 +129,100 @@ earlier reviews stands: keep building here. For the session half specifically,
 prefer upstream's bundle format and import route over copying CLI files by hand.
 It is versioned (`bundle_version` 2, with additive keys) and already handles the
 signature and path problems above.
+
+## Follow-up: other prune-and-merge-back hazards
+
+The `session_map.json` bug has a general shape. KiroCrew removes or rewrites
+an entry because of something only true on one machine, and the three-way
+merge then treats that as an ordinary one-sided edit and applies it everywhere.
+Two engine properties decide where this can happen:
+
+- `merge_json` keeps a one-sided key deletion, and treats a JSON **list** as a
+  single value. So a rewrite of any list on one machine replaces the untouched
+  list on the other.
+- Whole-file deletions do *not* spread: `pack` never deletes a local file. A
+  file one machine deletes comes back from any machine that still has it. That
+  is a separate issue (resurrection, not loss), and none of the cases below
+  depends on it.
+
+Every file in `ALLOW` was checked against upstream `main` for writers that
+remove or rewrite entries on their own, meaning at load, at startup, or in a
+sweep, rather than because the user asked.
+
+### Fixed
+
+| File | Upstream writer | Hazard | Fix |
+|---|---|---|---|
+| `autonudge.json` | `autonudge.py` `AutoNudgeService._load`, `repair_sentinel_path` | Every gateway re-arms the loops it finds, so a synced store fired the same nudges on every machine, which is the `crons.json` problem. `_load` also moves rows that fail *this host's* credential policy into `autonudge.quarantine.json` (not synced), stops loops interrupted mid-delivery, and re-homes or clears `stop_sentinel_path` against the local data home. `loops` is one list, so the rewrite replaced the owner's copy. | `DENY` (`lib/kcsync/files.py`) |
+| `config.json` (`connections_ui`) | `config/loader.py` `load` / `_apply_document_migrations` | A stored `connections_ui: false` is stripped unless the local marker `connections_ui_migrated.json` exists. A machine without the marker (a newly onboarded one, say) deleted a deliberate opt-out, and the deletion merged back. | Marker added to `ALLOW` |
+| `config.json` (superseded defaults) | `config/superseded_defaults.py` `auto_adoptable`, `record_adoptions`; `loader.py` migration | `agent.chat_turn_timeout_secs` = 7200 and `agent.subagent_timeout_secs` = 1800 are removed once, when the ledger `superseded_acked.json` does not list them. Upstream's own docstring says being removed twice is "precisely what the one-shot guarantee exists to prevent". Without the ledger, a second machine removed a value the operator had restored, and that removal merged back. | Ledger added to `ALLOW` |
+| `config.json` (`memory.embed_model_stamp`, `memory.embed_model_legacy_ids`) | `embeddings.py` `_verify_custom_model`, `_model_file_stamp`; the legacy-ids reconcile in `embeddings.py` | The stamp is `stat()` of the local model file (`st_dev`, `st_ino`, `mtime_ns`, …), so it never matches on another machine. Each machine re-hashed the weights and wrote its own stamp, producing a conflict on every sync. On a machine whose vectors predate the recorded model file, a foreign stamp fails the legacy-vector check and starts an embedding-space change, which means a full re-embed. The legacy ids can also be popped by the rewrite. | New `LOCAL_ONLY_KEYS` in `files.py`: stripped on unpack and restored from the local file on pack, the same way secrets are handled |
+
+All four fixes are covered in `tests/test_sync_paths.sh`. The tests also check
+that a repo written by an older build cannot plant another machine's values.
+
+### Found, not fixed
+
+- **List-valued files lose one side wholesale** (`tags.json`,
+  `tag_boards.json`, `hooks.json` `hooks`). When both machines change the list,
+  `merge_json` keeps one of the two lists. Upstream then makes the loss stick.
+  `DashboardState.load_tags` prunes column `tag_ids` that are not in the
+  vocabulary. The slot-restore paths in `dashboard/chat_persistence.py` prune
+  each chat's `tags`, which live in the transcript's metadata line, against the
+  same vocabulary, and the next save writes the pruned list back. `load_tags`
+  also seeds a default vocabulary when `tags.json` is missing, which gives a
+  fresh machine a competing list. Script hooks write
+  `last_run`/`run_count`/`last_status` on every run, so the `hooks` list
+  changes constantly. Not fixed here because the fix is a merge rule: merge
+  lists of `{id: …}` objects by id, with an ordering that does not depend on
+  which side is "ours" (both tag files carry an `order` field). That changes
+  merge semantics for team scope as well, so it deserves its own change and
+  tests.
+- **App trust grants** (`config.json` `agent.apps_trusted`,
+  `apps_trusted_local`, `apps_trusted_repositories`). `apps/**` is denied, so
+  apps are per machine, but the grants sync. `apps/manager.py`
+  `_drop_trust_grant`, run on uninstall, therefore withdraws the grant on every
+  machine, including one that still has the app. This fails closed and is
+  fixed by re-trusting. The reverse direction is the more serious one: a
+  name-only grant can reach a machine where the same name is a different app.
+  Registry grants are bound to a repository, but local grants are bound only to
+  the name. Not fixed because whether consent should follow a person across
+  machines is a product decision. `LOCAL_ONLY_KEYS` would implement either
+  answer.
+- **`admission_policy.json` checksum.** Nothing upstream prunes it. But `pack`
+  rewrites every JSON file key-sorted, so the bytes stop matching the seed
+  checksum in `.migrations/admission_policy.sha256` (local and denied), and
+  `platform/admission.py` `_verify_seed_integrity` logs an integrity event on
+  every load. This is detection only; the policy itself is not affected.
+  Skipping the write when the parsed content is unchanged would fix it.
+- **App history classifier** (`app/backend/artifacts.py` `_classify_path`).
+  It matches file names against `record.table`, but for JSON conflicts
+  `merge_json` records the JSON key path there (for example
+  `dashboard.theme`), and the file path is in `record.path`. So real
+  config-file conflicts are never classified. The unit test builds records
+  with the file name in `table`, which is why it passes. `session_map.json` and
+  `autonudge.json` stay in `_CONFIG_FILE_NAMES` (the comment there explains
+  why), but the classifier should read `record.path`.
+
+### Checked, no hazard
+
+- `model_windows.json` (`model_registry.py` `refresh_kiro_windows`,
+  `persist_kiro_windows`): add or update only, and never removes an entry.
+- `sessions/*.jsonl` and `sessions/archive/*.jsonl` (`history_rewrite.py`
+  `_rewrite_session_locked`, `_maybe_rotate`;
+  `channel_transcript_migration.py`): compaction and rotation archive every
+  dropped row into `sessions/archive/`, which syncs. The channel migration is
+  a content merge followed by a file delete, and file deletes do not spread.
+- `artifacts/**` (`artifacts.py` `prune_auto_widgets`, `_prune_versions`,
+  `_prune_oldest_threads`): the sweeps delete whole directories or files,
+  which do not spread. The comment cap works on synced content, not local
+  state. `clear_publication` and `mark_webapp_expired` run only on user
+  actions.
+- `workspace/*.md`, `workspace/memory/**` (`memory.py` `prune_history`):
+  date-based file deletion, not machine-local.
+- `hooks.json` webhook contexts (`mcp_tools/control.py` `register_hook`,
+  `hooks.py` `_write_hooks_file`): additive, and nothing expires or deletes
+  them on disk.
+- `config.json`, other startup writers: the workspace, agent seed and
+  default-agent migrations, the `meta.lastTouchedVersion` stamp, and
+  `memory_stores.py` `migrate_legacy_member_stores` only add or fill values.
