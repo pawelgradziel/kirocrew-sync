@@ -61,9 +61,33 @@ DATABASES = {
 }
 
 # Databases that are pure derived indexes. Never synced; rebuilt by KiroCrew.
+# A named V1 store's own memory_stores/<name>/memory_index.db is the same kind
+# of file; it is kept out by files.DENY's "**/*.db" and never discovered as a
+# store database (stores.py only looks for memory.db).
 DERIVED_DATABASES = [
     "memory_index.db",
 ]
+
+# Per-member memory stores are discovered, not listed: one database per
+# directory under <data home>/memory_stores/, named by the operator or by
+# KiroCrew (`member-<member id>-<uuid>`). Each is its own logical database,
+# `memory_stores/<name>`, so it gets its own _schema.sql, its own drift check
+# and its own embedding check. lib/kcsync/stores.py owns discovery and name
+# validation; every discovered database shares the one override table below.
+STORE_DB_PREFIX = "memory_stores/"
+STORE_POLICY_KEY = "memory_stores/*"
+
+
+def is_store_db(db_name):
+    """True for a discovered `memory_stores/<name>` logical database."""
+    return isinstance(db_name, str) and db_name.startswith(STORE_DB_PREFIX)
+
+
+def overrides_for(db_name):
+    """The explicit override table that applies to *db_name*."""
+    if is_store_db(db_name):
+        return OVERRIDES[STORE_POLICY_KEY]
+    return OVERRIDES.get(db_name, {})
 
 OVERRIDES = {
     "memory": {
@@ -120,6 +144,64 @@ OVERRIDES = {
         "folder_file_state": TablePolicy(LWW, ts_col="last_seen"),
         "ingestion_jobs": TablePolicy(LOCAL, note="transient job state"),
     },
+    # One crew member's private memory.db (KiroCrew 0.7 "isolated memory v2":
+    # upstream memory_schema.CREW_SCHEMA_SQL + MEMBER_SCHEMA_SQL), and a named
+    # V1 store's memory.db, which is the same crew lineage without the member
+    # tables.
+    #
+    # Nothing here is `shared`, and stores.py does not even discover stores in
+    # team scope. Upstream builds this memory to be private to one member, and
+    # team scope is opt-in. The one part a team might want, lessons, cannot be
+    # split out: on this lineage a lesson is a `memory_items` row (kind
+    # 'directive', key 'lesson.*') in the same table as raw episodes, and the
+    # engine publishes whole tables. memory.db's semantic_memory can be shared
+    # because it holds no conversation text. memory_items does.
+    STORE_POLICY_KEY: {
+        # Facts, directives (lessons) and episodes in one table. A semantic row
+        # bumps updated_at on every edit; an episode's updated_at is its
+        # created_at and never moves. last_accessed_at is read state, so it
+        # must not drive LWW (the same reasoning as episodic_memories).
+        "memory_items": TablePolicy(
+            LWW, ts_col="updated_at", tombstone_col="is_deleted",
+            note="crew-lineage memory rows; episodes carry conversation text"),
+        # Same table, same shape, same AUTOINCREMENT problem as memory.db's.
+        "memory_events": TablePolicy(
+            UNION,
+            identity=("created_at", "event_type", "memory_type", "memory_key", "source"),
+            renumber="id",
+            note="append-only event log; ids are machine-local"),
+        # Per-record revision journal (upstream memory_record_metadata).
+        # AUTOINCREMENT again: id 12 on two machines is two different
+        # revisions. Rows are appended and pruned, never updated, so a union on
+        # the natural identity is exact. created_at leads the identity so the
+        # renumbered ids keep chronological order, which is what upstream's
+        # readers assume (ORDER BY id DESC, keep-the-latest-N pruning).
+        "memory_revisions": TablePolicy(
+            UNION,
+            identity=("created_at", "record_id", "revision", "base_revision",
+                      "status", "operation", "source"),
+            renumber="id",
+            note="append-only revision journal; ids are machine-local"),
+        "memory_record_meta": TablePolicy(LWW, ts_col="updated_at"),
+        # One row per day. KiroCrew rewrites the whole day on every append, so
+        # two machines appending to the same day is an edit/edit conflict, and
+        # LWW keeps one machine's version of that day (logged as a conflict).
+        "memory_history": TablePolicy(LWW, ts_col="updated_at"),
+        # Idempotency receipts for consolidation runs, written once per source.
+        "memory_consolidations": TablePolicy(LWW, ts_col="created_at"),
+        # The store's immutable identity, (member_id, store_id). Neither value
+        # is machine-specific: member_id is also in config.json and store_id is
+        # the directory name. KiroCrew refuses a member store without this row,
+        # so a store created here from the sync repo needs it.
+        "member_database": TablePolicy(UNION, note="immutable store identity"),
+        # Carries this store's own embedding_space_sig, which the gate compares.
+        "memory_meta": TablePolicy(LWW, ts_col="updated_at"),
+        "schema_version": TablePolicy(UNION),
+        "sqlite_sequence": TablePolicy(SKIP, note="managed by SQLite"),
+        # memory_fts and its shadow tables are inferred SKIP (virtual table).
+        # After pack they are rebuilt from memory_items + memory_history, the
+        # same derivation as upstream's rebuild_memory_index (stores.py).
+    },
 }
 
 # Columns that, when present, are good LWW discriminators, in preference order.
@@ -145,7 +227,7 @@ def infer(columns, pk_columns, is_virtual, is_shadow):
 
 def for_table(db_name, table_info):
     """Resolve the merge policy for one dbio.TableInfo."""
-    override = OVERRIDES.get(db_name, {}).get(table_info.name)
+    override = overrides_for(db_name).get(table_info.name)
     if override is not None:
         return override
     return infer(table_info.columns, table_info.pk_columns,

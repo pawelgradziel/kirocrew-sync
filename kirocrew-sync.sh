@@ -403,9 +403,13 @@ ensure_repo() {
 db/**/*.jsonl           merge=kcsync-rows
 # A schema difference means the machines are on different KiroCrew versions.
 # Treating it as binary forces a hard conflict instead of a silent text merge.
-db/*/_schema.sql        merge=binary
+# `**/` so a member memory store (db/memory_stores/<name>/) is covered too.
+db/**/_schema.sql       merge=binary
 # Regenerated from the schema on every unpack.
-db/*/_policy.json       merge=ours
+db/**/_policy.json      merge=ours
+# A memory store's full DDL, used only to create it on a machine that lacks
+# it. Regenerated on every unpack; the drift gate compares _schema.sql.
+db/**/_ddl.json         merge=ours
 # Structural merge, key by key.
 files/**/*.json         merge=kcsync-json
 # Session transcripts are append-only. The archive segments a long

@@ -14,6 +14,7 @@ import shutil
 from pathlib import Path
 
 from . import policy as pol
+from . import stores
 from .canon import dumps_pretty
 
 # Only these ever leave the machine.
@@ -38,6 +39,15 @@ ALLOW = [
     "workspace/*.md",
     "workspace/memory/**",
     "artifacts/**",
+    # The plain-file half of each memory store under memory_stores/<name>/
+    # (see stores.py for the layout). The store's memory.db is synced row by
+    # row as its own logical database, never as a file. Store names are also
+    # validated (stores.file_store_ok), so `*` can never stand for "..", a
+    # dot-directory or the unreachable "default".
+    "memory_stores/*/memory/*.md",           # preferences.md, projects.md
+    "memory_stores/*/memory/history/*.md",   # named V1 store's daily history
+    "memory_stores/*/lessons.jsonl",         # named V1 store's lesson file
+    "memory_stores/*/member-memory.json",    # legacy ownership manifest
 ]
 
 # Deliberately absent, though upstream KiroCrew's own backup component set
@@ -84,6 +94,18 @@ DENY = [
     "run/**", "cache/**", "logs/**", "imports/**", "uploads/**",
     "cron-history/**", "usage/**", "models/**", "apps/**", "skills/**",
     ".migrations/**",
+    # Host-local state inside memory_stores/, exactly upstream's
+    # memory_stores.is_host_local_store_state: the historical member API key,
+    # the member backup/restore directory (which also holds the namespace and
+    # store-use lock files), execution logs, and a named store's own rolling
+    # backups. None of it is memory; a backup restored on another machine
+    # would roll that machine's store back to this one's past. A store's
+    # memory.db, its -wal/-shm and a named V1 store's derived memory_index.db
+    # are already covered by the "**/*.db*" rules above.
+    "memory_stores/.member-api-key",
+    "memory_stores/.member-backups/**",
+    "memory_stores/.execution-logs/**",
+    "memory_stores/*/backups/**",
 ]
 
 # JSON leaves whose values are credentials. Stripped from the synced copy and
@@ -136,11 +158,17 @@ def _matches(rel_path, patterns):
     return False
 
 
+def _allowlisted(rel_path, kirocrew_dir=None):
+    """On the allowlist, and (under memory_stores/) inside a usable store."""
+    return (_matches(rel_path, ALLOW)
+            and stores.file_store_ok(rel_path, kirocrew_dir))
+
+
 def is_allowed(rel_path, scope=pol.PERSONAL):
     rel_path = Path(rel_path)
     if _matches(rel_path, DENY):
         return False
-    if not _matches(rel_path, ALLOW):
+    if not _allowlisted(rel_path):
         return False
     if scope == pol.TEAM:
         return _matches(rel_path, TEAM_ALLOW)
@@ -170,7 +198,7 @@ def scan_tree(kirocrew_dir, scope=pol.PERSONAL):
     root = Path(kirocrew_dir)
     syncable, veto, big = [], [], []
     for path, rel in _iter_files(root):
-        allow = _matches(rel, ALLOW)
+        allow = _allowlisted(rel, root)
         deny = _matches(rel, DENY)
         if allow and deny:
             veto.append(rel)
@@ -187,7 +215,7 @@ def withheld_for_scope(kirocrew_dir, scope):
     if scope != pol.TEAM:
         return []
     return [rel for _, rel in _iter_files(kirocrew_dir)
-            if _matches(rel, ALLOW) and not _matches(rel, DENY)
+            if _allowlisted(rel, kirocrew_dir) and not _matches(rel, DENY)
             and not _matches(rel, TEAM_ALLOW)]
 
 
@@ -293,6 +321,12 @@ def pack_files(in_dir, kirocrew_dir, dry_run=False, log=print,
         if not is_allowed(rel, scope):
             log("  WARN: refusing to write out-of-scope path %s" % rel)
             continue
+        if not stores.file_store_ok(rel, root):
+            # memory_stores/<name> on this machine is a link to somewhere
+            # else, possibly another member's store. Never write through it.
+            log("  WARN: refusing to write %s: its store directory is a link"
+                % rel)
+            continue
         dest = root / rel
 
         if path.suffix == ".json":
@@ -315,6 +349,9 @@ def pack_files(in_dir, kirocrew_dir, dry_run=False, log=print,
             if not dry_run:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(path, dest)
+        if not dry_run:
+            # Upstream keeps memory stores owner-only; so does this copy.
+            stores.make_private(root, rel)
         applied += 1
     return applied
 

@@ -122,6 +122,14 @@ full design and its trade-offs.
 | --- | --- |
 | `memory.db` | Semantic and episodic memory, learned lessons, memory event log |
 | `workspace/knowledge/knowledge.db` | Knowledge items, entities, relations, sources |
+| `memory_stores/<name>/memory.db` | Each crew member's private memory (KiroCrew 0.7+): facts, lessons, episodes, daily history, revision journal, event log, store identity. Personal scope only |
+
+Member memory stores are found by scanning `memory_stores/` on every sync.
+Each store is its own database in the sync repo (`db/memory_stores/<name>/`),
+with its own schema and embedding checks. A store that exists on only one
+machine is created on the other from its recorded schema. Store names are
+validated the way KiroCrew validates them, and a store directory that is a
+link to somewhere else is skipped.
 
 **Files** (merged structurally or by union):
 
@@ -132,10 +140,13 @@ full design and its trade-offs.
 | `hooks.json`, `model_windows.json` | Runtime metadata |
 | `workspace/memory/` | Workspace memory notes |
 | `artifacts/` | Saved widgets and artifacts |
+| `memory_stores/<name>/memory/*.md`, `memory/history/*.md` | A member's preferences and projects; a named store's daily history |
+| `memory_stores/<name>/lessons.jsonl`, `member-memory.json` | A named store's lesson file; the legacy ownership manifest |
 
 **Deliberately not synced:**
 
-- `memory_index.db` and FTS indexes — derived data, rebuilt locally after every sync
+- `memory_index.db` and FTS indexes — derived data, rebuilt locally after every sync (this includes each store's `memory_fts` and a named store's own `memory_index.db`)
+- Host-local state under `memory_stores/`: `.member-api-key`, `.member-backups/` (rolling backups, restore journals, locks), `.execution-logs/`, and a named store's `backups/` — the same set KiroCrew's own export leaves out
 - `mcp.json`, `.local_secret`, `token_signing.key`, `sel_hmac.key` — credentials
 - `security_events.jsonl`, `audit.log`, `gateway.log` — local audit logs (often 30 MB+)
 - `.machine_id`, `path_map.conf`, PID files, lock files, `run/`, `cache/`, `logs/`
@@ -589,6 +600,7 @@ export SYNC_SCOPE="team"
 | Chat transcripts, live and archived (`sessions/`) | ✅ | ❌ |
 | Episodic memory — raw conversation text | ✅ | ❌ |
 | Memory event log | ✅ | ❌ |
+| Crew member memory stores (`memory_stores/`), lessons included | ✅ | ❌ |
 | Personal config (`config.json`, `hooks.json`, `autonudge.json`, …) | ✅ | ❌ |
 | Per-machine ingest state (`folder_file_state`) | ✅ | ❌ |
 | API tokens and credentials | ❌ | ❌ |
@@ -610,6 +622,11 @@ direction in which a wrong guess is harmless.
   travel — every knowledge item references it — so a folder source added on
   your machine shows up as `~/code/whatever` for the team. Portable-path
   encoding (ADR 0001) strips your home directory, not the rest of the path.
+- **Member memory stays personal.** KiroCrew keeps each crew member's memory
+  private to that member. A member's lessons are in the same table as their
+  raw conversation episodes, so the lessons cannot be shared without the
+  episodes. Team scope does not look at `memory_stores/`, and does not publish
+  the store names either (a store name contains the member id).
 - **Team scope does not retract what personal scope already published.** If you
   synced a backend personally and then switch it to team, the earlier data is
   still in that repo's history. Start a team scope against a fresh backend
@@ -700,6 +717,7 @@ For the other backends, see the troubleshooting section of
 ```bash
 ./tests/run_tests.sh                  # two-machine three-way merge, 61 assertions
 ./tests/test_team_scope.sh            # what team scope shares and withholds
+./tests/test_member_stores.sh         # crew member memory stores (memory_stores/)
 ./tests/test_seed.sh                  # export/import: seeding a new machine
 ./tests/test_portable_paths.sh        # path translation
 ./tests/test_sync_paths.sh            # path round trip between two machines

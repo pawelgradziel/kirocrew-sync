@@ -113,14 +113,93 @@ This is the supported way to move a *resumable* session, as opposed to the
 raw-file approach in the TODO. Worth considering before building a second sync
 root.
 
-### Found, not fixed: member memory stores do not sync
+### Fixed here (personal scope): member memory stores now sync
 
 v0.7.0 added isolated per-member memory (#9553, simplified to one SQLite store
-per member in `bc0d2b0cf`) under `<data home>/memory_stores/`. That path is not
-in `ALLOW`, and `DATABASES` in `policy.py` only knows `memory.db` and
-`knowledge.db`. Crew-member lessons and memories stay on the machine that
-learned them. Closing this needs a row-level policy for the new store schema,
-not an allowlist line, because `**/*.db` is denied on purpose.
+per member in `bc0d2b0cf`) under `<data home>/memory_stores/`. That path was
+not in `ALLOW`, and `DATABASES` in `policy.py` only knew `memory.db` and
+`knowledge.db`, so crew-member lessons and memories stayed on the machine that
+learned them.
+
+**Layout, from upstream `memory_stores.py`, `memory_schema.py`,
+`vector_memory.create_member_database` and `member_memory_backup.py`:**
+
+| Path under `memory_stores/` | What it is | Here |
+|---|---|---|
+| `<name>/memory.db` | The memory. A V2 member store holds `memory_items` (facts, directives/lessons and episodes in one table, with embeddings), `memory_events`, `memory_meta`, `schema_version`, `memory_record_meta`, `memory_revisions`, and the member tables `member_database` (identity), `memory_history`, `memory_consolidations`, plus the `memory_fts` FTS5 table and two read-only views. A named V1 store's `memory.db` is the same crew lineage without the member tables. | Rows, as logical database `memory_stores/<name>` |
+| `<name>/memory/preferences.md`, `projects.md` | Manual documents | File |
+| `<name>/memory/history/*.md` | A named V1 store's daily history | File |
+| `<name>/lessons.jsonl` | A named V1 store's lesson file | File |
+| `<name>/member-memory.json` | Legacy ownership manifest, read by the upgrade | File |
+| `<name>/memory_index.db`, and `memory_fts` inside `memory.db` | Derived FTS | Never synced; `memory_fts` is rebuilt after pack using upstream's `rebuild_memory_index` derivation |
+| `.member-api-key`, `.member-backups/`, `.execution-logs/`, `<name>/backups/` | Host-local (`is_host_local_store_state`) | `DENY` |
+
+**What changed:**
+
+- `lib/kcsync/stores.py` finds stores on disk and in the sync repo. It
+  validates each name with upstream's rules (one lowercase segment, no dots or
+  separators, not `default`, not a Windows device name). It also skips a store
+  whose directory resolves anywhere but itself, or whose `memory.db` is a
+  symlink or hard link. These are the same identity checks upstream applies,
+  so a link from `acme` to `finance` cannot merge two members' memory.
+- Each store is its own logical database with its own `_schema.sql`, so the
+  drift gate and the pre-merge quarantine work per store. The embedding gate
+  compares each store's own `embedding_space_sig`. A store on both machines
+  with two signatures is an error, so that machine is quarantined. A store that
+  exists only on the remote gets a warning: it arrives as its own file, and
+  KiroCrew reconciles its embedding space when it opens the store.
+- A store that exists on only one machine is created on the other from
+  `_ddl.json`, which lists every CREATE statement including the FTS table and
+  the views. The directory is `0700` and the file is `0600`, as upstream
+  creates them. If the pack fails, the new file is removed.
+- Store tables have explicit overrides in `policy.py` (`memory_stores/*`).
+  `memory_events` and `memory_revisions` are unioned on their natural key and
+  renumbered. `memory_items` uses LWW on `updated_at`, never on
+  `last_accessed_at`. `member_database` travels, because a store without it is
+  refused; its `(member_id, store_id)` is not machine-specific. `memory_fts` is
+  skipped.
+- `.gitattributes` now uses `db/**/` for `_schema.sql`, `_policy.json` and
+  the new `_ddl.json`. The merge driver resolves two-segment database names.
+- Covered by `tests/test_member_stores.sh`: a store appearing on the other
+  machine, row merges, renumbering, LWW, host-local files never published,
+  schema and embedding quarantine, invalid names and aliased stores, and team
+  scope withholding.
+
+**Deliberately excluded:**
+
+- **Team scope: all of it.** Upstream builds this memory to be private to one
+  member. A member's lessons are `memory_items` rows in the same table as raw
+  episodes, and the engine publishes whole tables, so the lessons cannot be
+  shared without the episodes. Team scope does not scan `memory_stores/` at all,
+  because even a store name discloses a member id.
+- **Host-local state**, as listed above. A restored backup from another machine
+  would roll this machine's store back to that machine's past. `.member-api-key`
+  is a historical credential.
+- **Nothing was excluded because of a machine-bound identity.** Upstream's
+  routing reads `member_database` and `config.json`, and neither contains a
+  host key. The only key file, `.member-api-key`, is already host-local.
+
+**What remains (not fixed):**
+
+- **Deleting a whole store does not propagate.** A store directory removed on
+  one machine is created again from the repo on the next pack. Upstream keeps
+  the stores of deleted members, so this should be rare.
+- **Two machines writing history for the same day.** `memory_history` is one
+  row per day, rewritten on every append. If both machines append to the same
+  day, LWW keeps one machine's version and logs a conflict.
+- **The same member created on two machines before they sync.** Each machine
+  allocates its own `member_id` and store name. The key-by-key `config.json`
+  merge can then take `memory_store` from one machine and `member_id` from the
+  other. KiroCrew would refuse that member until it is fixed by hand. Both
+  stores still sync.
+- **Found while doing this: the global `memory.db` has the same revision
+  journal.** Upstream runs `memory_record_metadata.ensure_schema` on every
+  vector file, so the root `memory.db` also has `memory_revisions` (an
+  AUTOINCREMENT id) and `memory_record_meta`. `OVERRIDES["memory"]` does not
+  list them yet. `memory_revisions` is therefore inferred as LWW keyed on the
+  machine-local id, so revision 5 on two machines can collide. The fix is to
+  copy the two store overrides into `OVERRIDES["memory"]`. It is not in this
+  change.
 
 ## Recommendation
 

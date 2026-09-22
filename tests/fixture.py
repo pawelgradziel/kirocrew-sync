@@ -323,9 +323,264 @@ def cmd_local_only(args):
     return 0
 
 
+# --------------------------------------------------------------------------
+# Member memory stores (<data home>/memory_stores/<name>/)
+# --------------------------------------------------------------------------
+
+# Upstream KiroCrew 0.7's member database, as vector_memory.create_member_database
+# builds it: memory_schema.CREW_SCHEMA_SQL (trimmed to the indexes that matter
+# here) + MEMBER_SCHEMA_SQL + memory_record_metadata.ensure_schema + the
+# schema_version table. Views and the FTS5 table included: a store created on
+# the other machine has to come out with all of them.
+STORE_SCHEMA = """
+CREATE TABLE memory_items (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('directive', 'fact', 'episode')),
+    key TEXT, text TEXT NOT NULL, value_json TEXT, embedding BLOB,
+    conversation_id TEXT, tags TEXT NOT NULL DEFAULT '[]',
+    scope TEXT NOT NULL DEFAULT '', surface TEXT NOT NULL DEFAULT '',
+    crew TEXT NOT NULL DEFAULT '', session_key TEXT NOT NULL DEFAULT '',
+    derived_from TEXT NOT NULL DEFAULT '',
+    importance REAL NOT NULL DEFAULT 0.5, confidence REAL NOT NULL DEFAULT 0.5,
+    source TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    last_accessed_at TEXT, is_deleted INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (key));
+CREATE INDEX idx_mi_kind_live ON memory_items (kind, is_deleted);
+CREATE VIEW semantic_memory AS
+    SELECT key, value_json, confidence, source, created_at, updated_at, is_deleted,
+           embedding
+      FROM memory_items WHERE kind IN ('directive', 'fact');
+CREATE VIEW episodic_memories AS
+    SELECT id, conversation_id, text, embedding, tags, importance, created_at,
+           last_accessed_at, is_deleted
+      FROM memory_items WHERE kind = 'episode';
+CREATE TABLE memory_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL,
+    memory_type TEXT NOT NULL, memory_key TEXT NOT NULL, old_value TEXT,
+    new_value TEXT, source TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE memory_meta (
+    key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE member_database (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    format_version INTEGER NOT NULL, member_id TEXT NOT NULL,
+    store_id TEXT NOT NULL);
+CREATE TABLE memory_history (
+    day TEXT PRIMARY KEY, content TEXT NOT NULL, revision INTEGER NOT NULL,
+    updated_at TEXT NOT NULL);
+CREATE TABLE memory_consolidations (
+    source_id TEXT PRIMARY KEY, source_total INTEGER NOT NULL,
+    source_count INTEGER NOT NULL, source_digest TEXT NOT NULL,
+    receipt_json TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE VIRTUAL TABLE memory_fts USING fts5(path UNINDEXED, content);
+CREATE TABLE memory_record_meta (
+    record_id TEXT PRIMARY KEY, kind TEXT NOT NULL, revision INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active', content_hash TEXT NOT NULL,
+    updated_at TEXT NOT NULL);
+CREATE TABLE memory_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, record_id TEXT NOT NULL,
+    revision INTEGER NOT NULL, base_revision INTEGER NOT NULL,
+    status TEXT NOT NULL, operation TEXT NOT NULL, source TEXT NOT NULL,
+    before_json TEXT, after_json TEXT, metadata_json TEXT NOT NULL,
+    created_at TEXT NOT NULL);
+CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT);
+"""
+
+
+def _store_db(root, name):
+    return Path(root) / "memory_stores" / name / "memory.db"
+
+
+def _store_write(conn, key, text, ts, source):
+    """One semantic write the way the engine records it: row, event, revision."""
+    row = conn.execute("SELECT revision FROM memory_record_meta WHERE record_id=?",
+                       ["key:" + key]).fetchone()
+    revision = (row[0] if row else 0) + 1
+    kind = "directive" if key.startswith("lesson.") else "fact"
+    conn.execute(
+        "INSERT INTO memory_items (id,kind,key,text,value_json,source,created_at,"
+        "updated_at,embedding) VALUES (?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(key) DO UPDATE SET text=excluded.text,"
+        " value_json=excluded.value_json, updated_at=excluded.updated_at,"
+        " is_deleted=0",
+        ["key:" + key, kind, key, text, json.dumps(text), source, ts, ts,
+         bytes([len(key) % 256]) * 1024])
+    conn.execute(
+        "INSERT INTO memory_record_meta VALUES (?,?,?,'active',?,?) "
+        "ON CONFLICT(record_id) DO UPDATE SET revision=excluded.revision,"
+        " content_hash=excluded.content_hash, updated_at=excluded.updated_at",
+        ["key:" + key, kind, revision, "hash-" + text, ts])
+    conn.execute(
+        "INSERT INTO memory_revisions (record_id,revision,base_revision,status,"
+        "operation,source,after_json,metadata_json,created_at) "
+        "VALUES (?,?,?,'accepted','upsert',?,?,'{}',?)",
+        ["key:" + key, revision, revision - 1, source, json.dumps(text), ts])
+    conn.execute(
+        "INSERT INTO memory_events (event_type,memory_type,memory_key,source,"
+        "created_at) VALUES ('update','semantic',?,?,?)", [key, source, ts])
+    # KiroCrew maintains memory_fts on write; the sync never exports it.
+    conn.execute("INSERT INTO memory_fts(path,content) VALUES (?,?)",
+                 ["key:" + key, key + " " + text])
+
+
+def cmd_create_store(args):
+    """A member store as upstream provisions it, plus host-local neighbours."""
+    root = Path(args.dir)
+    stores_root = root / "memory_stores"
+    directory = stores_root / args.name
+    (directory / "memory").mkdir(parents=True, exist_ok=True)
+    conn = connect(directory / "memory.db")
+    conn.executescript(STORE_SCHEMA)
+    conn.execute("INSERT INTO schema_version VALUES (1001, ?)", [T0])
+    conn.execute("INSERT INTO member_database VALUES (1, 1, ?, ?)",
+                 [args.member_id, args.name])
+    conn.execute("INSERT INTO memory_meta VALUES ('schema_lineage','crew',?)", [T0])
+    conn.execute("INSERT INTO memory_meta VALUES ('embedding_space_sig',?,?)",
+                 [args.embedding_sig, T0])
+    _store_write(conn, "lesson.seed-" + args.name, "seed lesson of " + args.name,
+                 T0, "seed")
+    conn.commit()
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.close()
+    (directory / "memory" / "preferences.md").write_text(
+        "# Member Preferences\n- prefers tabs (%s)\n" % args.name, encoding="utf-8")
+    (directory / "memory" / "projects.md").write_text(
+        "# Member Projects\n", encoding="utf-8")
+    # Host-local, per upstream memory_stores.is_host_local_store_state. None
+    # of these may ever be published.
+    (stores_root / ".member-api-key").write_text(
+        "MEMBER-API-KEY-%s" % args.name, encoding="utf-8")
+    backups = stores_root / ".member-backups" / args.name
+    backups.mkdir(parents=True, exist_ok=True)
+    (backups / "memory.20260101T000000Z.md").write_text(
+        "MEMBER-BACKUP-CONTENT-%s" % args.name, encoding="utf-8")
+    (backups / ".store-use.lock").write_text("", encoding="utf-8")
+    logs = stores_root / ".execution-logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "run.log").write_text("EXECUTION-LOG-%s" % args.name, encoding="utf-8")
+    (directory / "backups").mkdir(exist_ok=True)
+    (directory / "backups" / "old.md").write_text(
+        "STORE-BACKUP-CONTENT-%s" % args.name, encoding="utf-8")
+    print("created store %s" % directory)
+    return 0
+
+
+def cmd_store_write(args):
+    conn = connect(_store_db(args.dir, args.name))
+    _store_write(conn, args.key, args.text, args.ts, "machine-" + args.dir[-1])
+    conn.commit()
+    conn.close()
+    return 0
+
+
+def cmd_store_episode(args):
+    """Raw conversation text, kind 'episode' in the same table as lessons."""
+    conn = connect(_store_db(args.dir, args.name))
+    conn.execute(
+        "INSERT INTO memory_items (id,kind,text,conversation_id,source,"
+        "created_at,updated_at) VALUES (?,'episode',?,?,'consolidation',?,?)",
+        [args.id, args.text, "conv-" + args.id, args.ts, args.ts])
+    conn.execute("INSERT INTO memory_fts(path,content) VALUES (?,?)",
+                 [args.id, " " + args.text])
+    conn.commit()
+    conn.close()
+    return 0
+
+
+def cmd_store_history(args):
+    conn = connect(_store_db(args.dir, args.name))
+    conn.execute(
+        "INSERT INTO memory_history VALUES (?,?,1,?) ON CONFLICT(day) DO UPDATE"
+        " SET content=excluded.content, revision=revision+1,"
+        " updated_at=excluded.updated_at", [args.day, args.content, args.ts])
+    conn.commit()
+    conn.close()
+    return 0
+
+
+def cmd_store_sql(args):
+    """Run one statement against a store (schema drift, signature changes)."""
+    conn = connect(_store_db(args.dir, args.name))
+    conn.execute(args.sql)
+    conn.commit()
+    conn.close()
+    return 0
+
+
+def cmd_store_dump(args):
+    """Everything in every store that is supposed to converge."""
+    root = Path(args.dir) / "memory_stores"
+    out = {}
+    if root.is_dir():
+        for directory in sorted(p for p in root.iterdir() if p.is_dir()):
+            db = directory / "memory.db"
+            if not db.exists():
+                continue
+            conn = connect(db)
+            entry = {
+                "identity": [list(r) for r in conn.execute(
+                    "SELECT member_id, store_id FROM member_database")],
+                "items": [dict(r) for r in conn.execute(
+                    "SELECT id, kind, key, text, is_deleted, updated_at,"
+                    " length(embedding) AS emb FROM memory_items ORDER BY id")],
+                "events": [dict(r) for r in conn.execute(
+                    "SELECT id, memory_key, source, created_at FROM memory_events"
+                    " ORDER BY id")],
+                "revisions": [dict(r) for r in conn.execute(
+                    "SELECT id, record_id, revision, created_at FROM"
+                    " memory_revisions ORDER BY id")],
+                "history": [dict(r) for r in conn.execute(
+                    "SELECT day, content FROM memory_history ORDER BY day")],
+                "fts": sorted(r[0] for r in conn.execute(
+                    "SELECT path FROM memory_fts")),
+                "views": sorted(r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='view'")),
+                "lessons_view": [r[0] for r in conn.execute(
+                    "SELECT key FROM semantic_memory ORDER BY key")],
+            }
+            conn.close()
+            prefs = directory / "memory" / "preferences.md"
+            entry["preferences"] = (prefs.read_text(encoding="utf-8")
+                                    if prefs.exists() else None)
+            out[directory.name] = entry
+    print(json.dumps(out, indent=2, sort_keys=True))
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("create-store")
+    p.add_argument("dir"); p.add_argument("name")
+    p.add_argument("--member-id", default="alice")
+    p.add_argument("--embedding-sig", default="sig-shared")
+    p.set_defaults(func=cmd_create_store)
+
+    p = sub.add_parser("store-write")
+    p.add_argument("dir"); p.add_argument("name")
+    p.add_argument("key"); p.add_argument("text")
+    p.add_argument("--ts", default="2026-02-01T00:00:00+00:00")
+    p.set_defaults(func=cmd_store_write)
+
+    p = sub.add_parser("store-episode")
+    p.add_argument("dir"); p.add_argument("name")
+    p.add_argument("id"); p.add_argument("text")
+    p.add_argument("--ts", default="2026-02-01T00:00:00+00:00")
+    p.set_defaults(func=cmd_store_episode)
+
+    p = sub.add_parser("store-history")
+    p.add_argument("dir"); p.add_argument("name")
+    p.add_argument("day"); p.add_argument("content")
+    p.add_argument("--ts", default="2026-02-01T00:00:00+00:00")
+    p.set_defaults(func=cmd_store_history)
+
+    p = sub.add_parser("store-sql")
+    p.add_argument("dir"); p.add_argument("name"); p.add_argument("sql")
+    p.set_defaults(func=cmd_store_sql)
+
+    p = sub.add_parser("store-dump")
+    p.add_argument("dir")
+    p.set_defaults(func=cmd_store_dump)
 
     p = sub.add_parser("create")
     p.add_argument("dir")
