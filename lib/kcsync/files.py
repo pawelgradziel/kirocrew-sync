@@ -35,6 +35,10 @@ ALLOW = [
     # with it.
     "connections_ui_migrated.json",
     "superseded_acked.json",
+    # Lists merge as whole values: concurrent edits on two machines keep one
+    # machine's tags, and KiroCrew then prunes tag ids the other lacked.
+    # Accepted by decision, not an oversight -- see "Decided (2026-09-22)" in
+    # docs/upstream-sync-review-2026-09-22.md.
     "tags.json",
     "tag_boards.json",
     "admission_policy.json",
@@ -154,6 +158,9 @@ SECRET_KEY_RE = re.compile(
 # reconcile in embeddings.py accepts those vectors only while the stored stamp
 # matches the local file; another machine's stamp fails that check and starts
 # an embedding-space change, a full re-embed on a machine that changed nothing.
+#
+# The agent.apps_trusted* grants are deliberately NOT here: app approvals
+# follow the person across machines (decided 2026-09-22; see the review doc).
 LOCAL_ONLY_KEYS = {
     "config.json": ("memory.embed_model_stamp", "memory.embed_model_legacy_ids"),
 }

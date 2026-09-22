@@ -272,32 +272,12 @@ that a repo written by an older build cannot plant another machine's values.
 
 ### Found, not fixed
 
-- **List-valued files lose one side wholesale** (`tags.json`,
-  `tag_boards.json`, `hooks.json` `hooks`). When both machines change the list,
-  `merge_json` keeps one of the two lists. Upstream then makes the loss stick.
-  `DashboardState.load_tags` prunes column `tag_ids` that are not in the
-  vocabulary. The slot-restore paths in `dashboard/chat_persistence.py` prune
-  each chat's `tags`, which live in the transcript's metadata line, against the
-  same vocabulary, and the next save writes the pruned list back. `load_tags`
-  also seeds a default vocabulary when `tags.json` is missing, which gives a
-  fresh machine a competing list. Script hooks write
-  `last_run`/`run_count`/`last_status` on every run, so the `hooks` list
-  changes constantly. Not fixed here because the fix is a merge rule: merge
-  lists of `{id: …}` objects by id, with an ordering that does not depend on
-  which side is "ours" (both tag files carry an `order` field). That changes
-  merge semantics for team scope as well, so it deserves its own change and
-  tests.
-- **App trust grants** (`config.json` `agent.apps_trusted`,
-  `apps_trusted_local`, `apps_trusted_repositories`). `apps/**` is denied, so
-  apps are per machine, but the grants sync. `apps/manager.py`
-  `_drop_trust_grant`, run on uninstall, therefore withdraws the grant on every
-  machine, including one that still has the app. This fails closed and is
-  fixed by re-trusting. The reverse direction is the more serious one: a
-  name-only grant can reach a machine where the same name is a different app.
-  Registry grants are bound to a repository, but local grants are bound only to
-  the name. Not fixed because whether consent should follow a person across
-  machines is a product decision. `LOCAL_ONLY_KEYS` would implement either
-  answer.
+- **`hooks.json` `hooks` loses one side wholesale.** When both machines
+  change the list, `merge_json` keeps one of the two lists, and script hooks
+  write `last_run`/`run_count`/`last_status` on every run, so the list changes
+  constantly. The fix is a merge rule for lists of `{id: …}` objects, merged by
+  id. It changes merge semantics for team scope as well, so it deserves its own
+  change and tests.
 - **`admission_policy.json` checksum.** Nothing upstream prunes it. But `pack`
   rewrites every JSON file key-sorted, so the bytes stop matching the seed
   checksum in `.migrations/admission_policy.sha256` (local and denied), and
@@ -312,6 +292,37 @@ that a repo written by an older build cannot plant another machine's values.
   with the file name in `table`, which is why it passes. `session_map.json` and
   `autonudge.json` stay in `_CONFIG_FILE_NAMES` (the comment there explains
   why), but the classifier should read `record.path`.
+
+### Decided (2026-09-22)
+
+- **App trust grants follow the person.** `config.json` `agent.apps_trusted`,
+  `apps_trusted_local` and `apps_trusted_repositories` keep syncing in personal
+  scope. Consent given on one machine applies on every machine, and so does
+  withdrawing it: uninstalling an app runs `apps/manager.py`
+  `_drop_trust_grant`, which removes the grant everywhere, including machines
+  that still have the app. Re-trusting it restores the grant.
+  Accepted consequences:
+  - Registry grants are bound to a repository (`apps_trusted_repositories`), and
+    KiroCrew refuses a registry install whose repository differs. So a
+    repository-backed grant cannot carry over to a different app.
+  - Local grants (`apps_trusted_local`, repository-less code) are bound only to
+    the name. A local app installed under a trusted name on another machine is
+    trusted there too. Give local apps distinct names on each machine, or don't
+    install a local app under a name you trusted elsewhere.
+  - Two machines granting different apps at the same time can lose one grant,
+    because the lists merge as whole values. That fails closed: the app asks
+    for trust again.
+- **`tags.json` and `tag_boards.json` concurrent edits are accepted as is.**
+  When both machines change the tag vocabulary or boards between syncs,
+  `merge_json` keeps one machine's list. KiroCrew then prunes tag ids the
+  surviving vocabulary lacks: `DashboardState.load_tags` prunes board columns,
+  and the slot-restore paths in `dashboard/chat_persistence.py` prune each
+  chat's `tags` and write the pruned list back. `load_tags` also seeds a default
+  vocabulary on a machine with no `tags.json`, which competes with the synced
+  one until that machine's first sync. Tags are cheap to recreate, and a
+  by-id merge rule would also change team-scope semantics, so we are not
+  building one. To avoid the loss, edit tags on one machine and sync before
+  editing them on another.
 
 ### Checked, no hazard
 

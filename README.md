@@ -697,6 +697,14 @@ direction in which a wrong guess is harmless.
 
 ### Things worth knowing
 
+- **App approvals follow you.** Trusting (or untrusting) a third-party app on
+  one machine applies on all of them. A registry app's approval is tied to its
+  repository. A local app's approval is tied only to its name, so a different
+  local app under the same name on another machine is trusted too.
+- **Tags are last-edit-wins as a whole.** If two machines change tags or tag
+  boards between syncs, one machine's tag list is kept and tags only the other
+  had are dropped, including from chats. Edit tags on one machine and sync
+  before editing them elsewhere.
 - **Each scope keeps its own sync repo** (`.sync/repo` and `.sync/repo-team`),
   so one machine can sync personally with one config and with a team using
   another. They have separate merge bases and never see each other's data.
