@@ -203,6 +203,128 @@ assert_eq "the next unpack removes a stale session_map.json from the repo" \
 assert_eq "and leaves the local session_map.json in place" \
     "yes" "$(exists "$CREW_B/session_map.json")"
 
+# --- autonudge.json stays on its machine ------------------------------------
+#
+# Every gateway re-arms the loops it finds, so a synced store fired the same
+# nudges on every machine, and KiroCrew's load-time repair (quarantine into an
+# unsynced sidecar, stopping interrupted loops) rewrote the one "loops" list,
+# which the merge then carried back to the machine that owned the loops.
+echo '{"loops": [{"id": "loop-a", "active": true}]}' > "$CREW_A/autonudge.json"
+echo '{"loops": [{"id": "loop-b", "active": true}]}' > "$CREW_B/autonudge.json"
+
+rm -rf "$SYNCED"
+(
+    export HOME="$HOME_A"
+    kcsync unpack --kirocrew-dir "$CREW_A" --repo "$SYNCED"
+) > /dev/null 2>&1 || { echo "  autonudge unpack step failed" >&2; exit 1; }
+
+assert_eq "autonudge.json is not published" \
+    "" "$(find "$SYNCED" -name 'autonudge.json' -print)"
+
+mkdir -p "$SYNCED/files"
+cp "$CREW_A/autonudge.json" "$SYNCED/files/autonudge.json"
+(
+    export HOME="$HOME_B"
+    kcsync pack --kirocrew-dir "$CREW_B" --repo "$SYNCED"
+) > /dev/null 2>&1 || { echo "  autonudge pack step failed" >&2; exit 1; }
+
+assert_eq "an old repo's autonudge.json does not overwrite the local one" \
+    "loop-b" "$(python3 -c "
+import json
+print(','.join(l['id'] for l in json.load(open('$CREW_B/autonudge.json'))['loops']))
+")"
+
+# --- config.json's migration ledgers travel with it -------------------------
+#
+# KiroCrew deletes a stored `connections_ui: false`, or a stored superseded
+# default, unless these files say that migration already ran. A machine without
+# them deleted the value the other machine had deliberately kept, and the merge
+# spread that deletion back.
+echo '{"migrated_at": "2026-09-01T00:00:00+00:00", "stripped_stale_false": false}' \
+    > "$CREW_A/connections_ui_migrated.json"
+echo '{"adopted": {"agent.subagent_timeout_secs": 1800}, "acked": {}}' \
+    > "$CREW_A/superseded_acked.json"
+rm -f "$CREW_B/connections_ui_migrated.json" "$CREW_B/superseded_acked.json"
+
+rm -rf "$SYNCED"
+(
+    export HOME="$HOME_A"
+    kcsync unpack --kirocrew-dir "$CREW_A" --repo "$SYNCED"
+    export HOME="$HOME_B"
+    kcsync pack --kirocrew-dir "$CREW_B" --repo "$SYNCED"
+) > /dev/null 2>&1 || { echo "  ledger sync step failed" >&2; exit 1; }
+
+assert_eq "the connections_ui migration marker reaches the other machine" \
+    "yes" "$(exists "$CREW_B/connections_ui_migrated.json")"
+
+assert_eq "the superseded-defaults ledger reaches the other machine" \
+    "1800" "$(python3 -c "
+import json
+print(json.load(open('$CREW_B/superseded_acked.json'))['adopted']['agent.subagent_timeout_secs'])
+")"
+
+# --- machine-local config.json leaves stay local ----------------------------
+#
+# memory.embed_model_stamp is a stat() of this machine's model file, and
+# embed_model_legacy_ids names the space this machine's own vectors were built
+# in. Another machine's values made KiroCrew re-hash the model and, for older
+# vectors, start a full re-embed.
+cat > "$CREW_A/config.json" <<'JSON'
+{"memory": {"embed_model_id": "custom:sha256:abc",
+            "embed_model_stamp": [1, 11, 100, 111, 111],
+            "embed_model_legacy_ids": ["custom:model.gguf:100"]},
+ "dashboard": {"theme": "dark"}}
+JSON
+cat > "$CREW_B/config.json" <<'JSON'
+{"memory": {"embed_model_id": "custom:sha256:old",
+            "embed_model_stamp": [2, 22, 100, 222, 222]},
+ "dashboard": {"theme": "light"}}
+JSON
+
+rm -rf "$SYNCED"
+(
+    export HOME="$HOME_A"
+    kcsync unpack --kirocrew-dir "$CREW_A" --repo "$SYNCED"
+) > /dev/null 2>&1 || { echo "  local-key unpack step failed" >&2; exit 1; }
+
+assert_eq "the model stamp and legacy ids are not published" \
+    "embed_model_id" "$(python3 -c "
+import json
+print(','.join(sorted(json.load(open('$SYNCED/files/config.json'))['memory'])))
+")"
+
+(
+    export HOME="$HOME_B"
+    kcsync pack --kirocrew-dir "$CREW_B" --repo "$SYNCED"
+) > /dev/null 2>&1 || { echo "  local-key pack step failed" >&2; exit 1; }
+
+config_b() {
+    python3 -c "
+import json
+c = json.load(open('$CREW_B/config.json'))
+m = c['memory']
+print(c['dashboard']['theme'], m['embed_model_id'], m.get('embed_model_stamp'),
+      m.get('embed_model_legacy_ids'))
+"
+}
+
+assert_eq "shared settings arrive, the local stamp stays, no legacy ids appear" \
+    "dark custom:sha256:abc [2, 22, 100, 222, 222] None" "$(config_b)"
+
+# A repo written before this rule carries machine A's values. They must not
+# replace machine B's, nor add a key machine B does not have.
+python3 - "$CREW_A/config.json" "$SYNCED/files/config.json" <<'PY'
+import json, sys
+json.dump(json.load(open(sys.argv[1])), open(sys.argv[2], "w"))
+PY
+(
+    export HOME="$HOME_B"
+    kcsync pack --kirocrew-dir "$CREW_B" --repo "$SYNCED"
+) > /dev/null 2>&1 || { echo "  local-key old-repo pack step failed" >&2; exit 1; }
+
+assert_eq "an old repo's stamp and legacy ids do not reach machine B" \
+    "dark custom:sha256:abc [2, 22, 100, 222, 222] None" "$(config_b)"
+
 # --- the running-KiroCrew guard does not trip over this script --------------
 #
 # The guard greps the process table for "kirocrew", which the sync script's own
