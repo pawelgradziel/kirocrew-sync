@@ -119,6 +119,15 @@ EXPORT_OUTPUT=""
 IMPORT_ARCHIVE=""
 IMPORT_MODE=""
 
+# send-session / inbox
+SEND_SLOT=""
+SEND_TO=""
+INCLUDE_LAYER_B=false
+SHARE_TRANSCRIPT=false
+INBOX_ACTION="list"
+INBOX_NAME=""
+INBOX_ALL=false
+
 PYTHON_BIN="${KIROCREW_SYNC_PYTHON:-python3}"
 
 # Scratch space for the transport payload. Script-level, not local to a
@@ -176,10 +185,14 @@ sync_lock_path() {
     echo "$SYNC_ROOT/sync-${SYNC_SCOPE}.lock"
 }
 
+# Optional arguments reuse the same lock mechanics for another resource:
+# $1 the lock file, $2 how to name the holder in the error. inbox --install
+# uses them to serialize installs (see cmd_inbox).
 acquire_sync_lock() {
     mkdir -p "$SYNC_ROOT"
-    local lock_file
-    lock_file="$(sync_lock_path)"
+    local lock_file="${1:-}"
+    local what="${2:-sync (scope: $SYNC_SCOPE)}"
+    [ -n "$lock_file" ] || lock_file="$(sync_lock_path)"
 
     local attempt
     for attempt in 1 2; do
@@ -192,7 +205,7 @@ acquire_sync_lock() {
         local lock_pid
         lock_pid="$(cat "$lock_file" 2>/dev/null || echo "")"
         if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
-            log_error "Another sync (scope: $SYNC_SCOPE) is already running, PID $lock_pid"
+            log_error "Another $what is already running, PID $lock_pid"
             log_info "Wait for it to finish and try again."
             log_info "If you're certain it's dead: rm '$lock_file'"
             exit 1
@@ -206,7 +219,7 @@ acquire_sync_lock() {
         # away.
     done
 
-    log_error "Could not acquire sync lock at $lock_file"
+    log_error "Could not acquire lock at $lock_file"
     exit 1
 }
 
@@ -1004,6 +1017,289 @@ cmd_import() {
     log_info "Run '$0 sync' from now on to merge further changes with the rest of the pair."
 }
 
+# --------------------------------------------------------------------------
+# send-session / inbox -- a session mailbox on the configured backend.
+#
+# A session travels as KiroCrew's own export file (GET
+# /api/chat/slots/{slot}/export) and is installed with KiroCrew's own import
+# route (POST /api/chat/slots/import), so upstream does the validation,
+# redaction, size caps and "Imported / from <sender>" filing. Both ends talk to
+# the RUNNING gateway; nothing here reads or writes KiroCrew's data
+# directories, and the running-KiroCrew guard does not apply (the gateway has
+# to be up). lib/kcsync/mailbox.py owns the gateway half; the backend's
+# backend_mailbox_* functions own the transport.
+#
+# The mailbox is <backend root>/mailbox/<recipient>/<file>, beside bundles/.
+# Every backend's push and pull exclude it, so mailbox traffic never enters
+# the three-way sync repo and a sync's --delete never removes it.
+# --------------------------------------------------------------------------
+
+MAILBOX_BROADCAST="all"
+# Local, never synced: $SYNC_ROOT is outside every ALLOW glob.
+MAILBOX_STATE="$SYNC_ROOT/mailbox-state.json"
+
+# Same normalisation as get_machine_id(): one path segment, no "--" (the
+# field separator in mailbox file names), no leading dot.
+sanitize_label() {
+    printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '-' \
+        | sed 's/-\{2,\}/-/g; s/^[-.]*//; s/-$//'
+}
+
+# This machine's mailbox address: MAILBOX_NAME from config.sh, else the
+# machine id. Also what the receiver sees as "from <sender>".
+mailbox_name() {
+    local name=""
+    [ -n "${MAILBOX_NAME:-}" ] && name="$(sanitize_label "$MAILBOX_NAME")"
+    if [ -z "$name" ]; then
+        get_machine_id
+    else
+        echo "$name"
+    fi
+}
+
+require_mailbox_backend() {
+    local fn
+    for fn in backend_mailbox_put backend_mailbox_get backend_mailbox_list \
+              backend_mailbox_delete; do
+        if ! declare -F "$fn" > /dev/null; then
+            log_error "Backend '$BACKEND' has no session mailbox support ($fn is missing)."
+            log_info "See docs/backends/custom.md, \"Mailbox functions\"."
+            exit 1
+        fi
+    done
+    if [ "$(mailbox_name)" = "$MAILBOX_BROADCAST" ]; then
+        log_error "MAILBOX_NAME cannot be '$MAILBOX_BROADCAST'; that address means every machine."
+        exit 1
+    fi
+    # config.sh may set these without `export`; mailbox.py reads them.
+    [ -n "${KIROCREW_PORT:-}" ] && export KIROCREW_PORT
+    [ -n "${KCSYNC_GATEWAY_URL:-}" ] && export KCSYNC_GATEWAY_URL
+    return 0
+}
+
+cmd_send_session() {
+    if [ -z "$SEND_SLOT" ]; then
+        log_error "send-session needs a slot key or session key"
+        log_info "Example: $0 send-session slot-3 --to laptop"
+        exit 1
+    fi
+    require_python
+    require_mailbox_backend
+
+    local me to
+    me="$(mailbox_name)"
+    if [ -z "$SEND_TO" ]; then
+        if [ "$SYNC_SCOPE" = "team" ]; then
+            log_error "Team scope: name the one colleague to send to with --to <name>."
+            exit 1
+        fi
+        to="$MAILBOX_BROADCAST"
+    else
+        to="$(sanitize_label "$SEND_TO")"
+        if [ -z "$to" ]; then
+            log_error "Not a usable recipient name: '$SEND_TO'"
+            exit 1
+        fi
+    fi
+
+    # Team sync never publishes transcripts (README "Team Scope"). Sending one
+    # to a colleague is allowed, but only as a deliberate, per-invocation act.
+    if [ "$SYNC_SCOPE" = "team" ]; then
+        if [ "$to" = "$MAILBOX_BROADCAST" ]; then
+            log_error "Refusing to broadcast a chat transcript to everyone on a team backend."
+            log_info "Name one recipient with --to <name>."
+            exit 1
+        fi
+        if ! $SHARE_TRANSCRIPT; then
+            log_error "This sends a chat transcript to '$to' through the team backend."
+            log_info "Team sync deliberately never publishes transcripts. This bundle"
+            log_info "carries the full visible conversation of '$SEND_SLOT', readable by"
+            log_info "anyone with access to that backend until '$to' installs or discards it."
+            $INCLUDE_LAYER_B && log_info "With --include-layer-b it can also carry the byte-exact, unredacted model context."
+            log_info "Re-run with --share-transcript to confirm."
+            exit 1
+        fi
+    fi
+
+    if [ "$to" = "$MAILBOX_BROADCAST" ]; then
+        log_info "Sending '$SEND_SLOT' to every machine on the $BACKEND backend (as '$me')."
+    else
+        log_info "Sending '$SEND_SLOT' to '$to' on the $BACKEND backend (as '$me')."
+    fi
+    log_warn "The bundle holds the full transcript, stored unencrypted on the backend."
+    if $INCLUDE_LAYER_B; then
+        log_warn "--include-layer-b: if KiroCrew allows it, the bundle also carries Layer B,"
+        log_warn "the byte-exact, UNREDACTED model context (it cannot be redacted without"
+        log_warn "breaking resume)."
+    fi
+
+    make_temp_dir
+    local args=(mailbox-export --kirocrew-dir "$KIROCREW_DIR" --slot "$SEND_SLOT"
+                --out "$TEMP_DIR/bundle" --origin "$me")
+    $INCLUDE_LAYER_B && args+=(--include-layer-b)
+    local name
+    if ! name="$(kcsync "${args[@]}")" || [ -z "$name" ]; then
+        log_error "Nothing was sent."
+        exit 1
+    fi
+
+    if ! backend_mailbox_put "$TEMP_DIR/bundle" "$to/$name"; then
+        log_error "Upload to the $BACKEND backend failed. Nothing was sent."
+        exit 1
+    fi
+    log_success "Sent: $to/$name"
+    log_info "On the receiving machine: $0 inbox --install"
+}
+
+# Prints "<address> <file> <size>" for everything addressed to this machine.
+inbox_listing() {
+    local me mid addr out
+    me="$(mailbox_name)"
+    mid="$(get_machine_id)"
+    local addresses=("$me")
+    [ "$mid" != "$me" ] && addresses+=("$mid")
+    addresses+=("$MAILBOX_BROADCAST")
+    for addr in "${addresses[@]}"; do
+        if ! out="$(backend_mailbox_list "$addr")"; then
+            log_error "Cannot reach the $BACKEND backend to read the mailbox." >&2
+            return 1
+        fi
+        [ -n "$out" ] || continue
+        printf '%s\n' "$out" | while read -r file size; do
+            [ -n "$file" ] && echo "$addr $file ${size:-?}"
+        done
+    done
+}
+
+cmd_inbox() {
+    require_python
+    require_mailbox_backend
+
+    local me mid
+    me="$(mailbox_name)"
+    mid="$(get_machine_id)"
+    local me_args=(--state "$MAILBOX_STATE" --me "$me" --me "$mid")
+
+    make_temp_dir
+    local listing="$TEMP_DIR/listing"
+    inbox_listing > "$listing" || exit 1
+
+    case "$INBOX_ACTION" in
+        list)
+            local list_args=("${me_args[@]}")
+            $INBOX_ALL && list_args+=(--all)
+            log_info "Session inbox for '$me' ($BACKEND backend):"
+            kcsync mailbox-list "${list_args[@]}" < "$listing"
+            ;;
+        install)
+            inbox_install "$listing" "${me_args[@]}"
+            ;;
+        discard)
+            if [ -z "$INBOX_NAME" ]; then
+                log_error "--discard needs a bundle name (see '$0 inbox')"
+                exit 1
+            fi
+            local addr
+            addr="$(awk -v n="$INBOX_NAME" '$2 == n {print $1; exit}' "$listing")"
+            if [ -z "$addr" ]; then
+                log_error "No bundle named '$INBOX_NAME' is addressed to this machine."
+                exit 1
+            fi
+            kcsync mailbox-discard --state "$MAILBOX_STATE" --name "$INBOX_NAME"
+            if [ "$addr" = "$MAILBOX_BROADCAST" ]; then
+                log_success "Hidden on this machine: $INBOX_NAME"
+                log_info "It was sent to every machine, so the backend copy stays for the others."
+            elif backend_mailbox_delete "$addr/$INBOX_NAME"; then
+                log_success "Discarded and removed from the backend: $INBOX_NAME"
+            else
+                log_warn "Discarded here, but could not remove it from the backend."
+            fi
+            ;;
+    esac
+}
+
+inbox_install() {
+    local listing="$1"; shift
+    # Serialized: two concurrent installs of the same bundle would each import
+    # it before either recorded it, and import makes a new session every time.
+    acquire_sync_lock "$SYNC_ROOT/mailbox.lock" "inbox --install"
+
+    local pending="$TEMP_DIR/pending"
+    kcsync mailbox-list "$@" --names-only < "$listing" > "$pending"
+
+    if [ -n "$INBOX_NAME" ]; then
+        local addr
+        addr="$(awk -v n="$INBOX_NAME" '$2 == n {print $1; exit}' "$listing")"
+        if [ -z "$addr" ]; then
+            log_error "No bundle named '$INBOX_NAME' is addressed to this machine."
+            exit 1
+        fi
+        if [ -z "$(awk -v n="$INBOX_NAME" '$2 == n' "$pending")" ] && ! $FORCE; then
+            log_error "'$INBOX_NAME' was already installed or discarded here."
+            log_info "Installing again makes a second, duplicate session. To do it anyway: --force"
+            exit 1
+        fi
+        echo "$addr $INBOX_NAME" > "$pending"
+    fi
+
+    if [ ! -s "$pending" ]; then
+        log_info "Nothing new to install."
+        return 0
+    fi
+
+    local installed=0 skipped=0 failed=0
+    local addr name rc result
+    local import_args=()
+    $FORCE && import_args+=(--force)
+    while read -r addr name; do
+        [ -n "$name" ] || continue
+        log_info "Installing $name (to $addr)..."
+        rm -f "$TEMP_DIR/download"
+        if ! backend_mailbox_get "$addr/$name" "$TEMP_DIR/download"; then
+            log_error "  could not download it from the $BACKEND backend"
+            failed=$((failed + 1))
+            continue
+        fi
+        rc=0
+        result="$(kcsync mailbox-import --kirocrew-dir "$KIROCREW_DIR" \
+            --file "$TEMP_DIR/download" --name "$name" --state "$MAILBOX_STATE" \
+            ${import_args[@]+"${import_args[@]}"})" || rc=$?
+        case "$rc" in
+            0) ;;
+            2|3)
+                # Gateway down or no credential: every other bundle would fail
+                # the same way, so stop here with that one message.
+                log_error "Stopped; nothing further was installed."
+                exit 1 ;;
+            *)
+                failed=$((failed + 1))
+                continue ;;
+        esac
+        if [ "$result" = "duplicate" ]; then
+            skipped=$((skipped + 1))
+        else
+            installed=$((installed + 1))
+        fi
+        # Delivered: remove a copy addressed to this machine alone. A
+        # broadcast stays for the sender's other machines.
+        if [ "$addr" != "$MAILBOX_BROADCAST" ]; then
+            backend_mailbox_delete "$addr/$name" \
+                || log_warn "  installed, but could not remove it from the backend"
+        fi
+    done < "$pending"
+
+    [ "$installed" -gt 0 ] && log_success "Installed $installed session(s) into KiroCrew (filed under Imported)"
+    [ "$skipped" -gt 0 ] && log_info "Skipped $skipped already-installed duplicate(s)"
+    if [ "$installed" -gt 0 ] && [ "$SYNC_SCOPE" = "personal" ]; then
+        log_info "An installed copy is an ordinary session: personal sync will carry its"
+        log_info "transcript to your other machines, including the one that sent it."
+    fi
+    if [ "$failed" -gt 0 ]; then
+        log_error "$failed bundle(s) could not be installed (see above); they stay in the inbox."
+        exit 1
+    fi
+}
+
 cmd_status() {
     require_python
     log_info "Machine ID: $(get_machine_id)"
@@ -1142,6 +1438,10 @@ Commands:
   status      Show pending changes and backend state
   doctor      Inspect local data and run preflight checks
   paths       Check whether knowledge source paths survive a sync
+  send-session <slot>   Export one session from the running KiroCrew and put
+              it in the backend's mailbox for another machine
+  inbox       List session bundles sent to this machine; --install them
+              into the running KiroCrew, or --discard one
   help        Show this message
 
 Options:
@@ -1160,6 +1460,19 @@ Options:
                    import, skip the existing-local-state check and replace
                    it with the archive.
   -o, --output <path>   export: where to write the archive (required)
+  --to <name>      send-session: recipient's MAILBOX_NAME or machine id, or
+                   "all" (default in personal scope; required in team scope)
+  --include-layer-b     send-session: ask KiroCrew to include the byte-exact,
+                   unredacted model context (also needs
+                   dashboard.export_include_layer_b=true in KiroCrew)
+  --share-transcript    send-session in team scope: confirm sending a
+                   transcript to a colleague
+  --list | --all   inbox: list new bundles (default); --all shows installed
+                   and discarded ones too
+  --install [name] inbox: install one bundle, or every new one. --force
+                   installs again a bundle already installed here
+  --discard <name> inbox: never install this bundle; removes it from the
+                   backend unless it was sent to "all"
 
 Exit codes:
   0   Success
@@ -1173,6 +1486,8 @@ Environment variables:
   KIROCREW_PATH_MAP     Path mapping file (default: \$KIROCREW_DIR/path_map.conf)
   SYNC_PORTABLE_PATHS   Rewrite knowledge paths for portability (default: 1)
   SYNC_SCOPE            personal (default) or team
+  MAILBOX_NAME          This machine's session mailbox address (default: machine id)
+  KIROCREW_PORT         Port of the running KiroCrew gateway (send-session/inbox)
 
 Examples:
   $0 sync
@@ -1183,6 +1498,9 @@ Examples:
   $0 export -o snap.tar.gz
   $0 import snap.tar.gz
   $0 import snap.tar.gz --force
+  $0 send-session slot-3 --to desktop
+  $0 inbox
+  $0 inbox --install
 
 Conflicts are resolved per row, not per file. "auto" keeps the most
 recently updated version of each row and never drops an edit in favour
@@ -1230,6 +1548,25 @@ while [ $# -gt 0 ]; do
             IMPORT_MODE="${2:-}"; shift 2 ;;
         --mode=*)
             IMPORT_MODE="${1#*=}"; shift ;;
+        --to)
+            SEND_TO="${2:-}"; shift 2 ;;
+        --to=*)
+            SEND_TO="${1#*=}"; shift ;;
+        --include-layer-b) INCLUDE_LAYER_B=true; shift ;;
+        --share-transcript) SHARE_TRANSCRIPT=true; shift ;;
+        --list)     INBOX_ACTION="list"; shift ;;
+        --all)      INBOX_ALL=true; shift ;;
+        --install)
+            # The name is optional: bare --install installs everything new.
+            INBOX_ACTION="install"; shift
+            if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
+                INBOX_NAME="$1"; shift
+            fi
+            ;;
+        --discard)
+            INBOX_ACTION="discard"; INBOX_NAME="${2:-}"
+            shift; [ $# -gt 0 ] && shift
+            ;;
         -*)
             log_error "Unknown option: $1"; show_help; exit 1 ;;
         *)
@@ -1238,6 +1575,8 @@ while [ $# -gt 0 ]; do
             # a stray bare word anywhere else still errors exactly as before.
             if [ "$COMMAND" = "import" ] && [ -z "$IMPORT_ARCHIVE" ]; then
                 IMPORT_ARCHIVE="$1"; shift
+            elif [ "$COMMAND" = "send-session" ] && [ -z "$SEND_SLOT" ]; then
+                SEND_SLOT="$1"; shift
             else
                 log_error "Unknown option: $1"; show_help; exit 1
             fi
@@ -1294,6 +1633,8 @@ case "$COMMAND" in
     status)  cmd_status ;;
     doctor)  cmd_doctor ;;
     paths)   cmd_paths ;;
+    send-session) cmd_send_session ;;
+    inbox)   cmd_inbox ;;
     help|--help|-h) show_help ;;
     *)
         log_error "Unknown command: $COMMAND"

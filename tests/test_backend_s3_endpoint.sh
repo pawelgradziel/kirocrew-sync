@@ -96,7 +96,7 @@ cat > "$STUB_BIN/aws" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "aws $*" >> "$AWS_STUB_CALLS"
 case "$*" in
-    *"/bundles/"*)
+    *"/bundles/"*|*" s3://"*"/mailbox/"*"/ "*)
         if [ -n "${AWS_STUB_LISTING:-}" ]; then
             printf '%s\n' "$AWS_STUB_LISTING"
         fi
@@ -158,13 +158,13 @@ assert_eq "push probes the bucket exactly as before" \
     "aws s3 ls s3://kirocrew-state --profile default" \
     "$(sed -n 1p "$AWS_STUB_CALLS")"
 assert_eq "push uploads exactly as before" \
-    "aws s3 sync $BUNDLE_DIR s3://kirocrew-state/kirocrew-sync/ --profile default --delete --exclude *.lock --exclude *.tmp" \
+    "aws s3 sync $BUNDLE_DIR s3://kirocrew-state/kirocrew-sync/ --profile default --delete --exclude *.lock --exclude *.tmp --exclude mailbox/*" \
     "$(sed -n 2p "$AWS_STUB_CALLS")"
 
 reset_calls
 backend_pull "$BUNDLE_DIR" >/dev/null
 assert_eq "pull downloads exactly as before" \
-    "aws s3 sync s3://kirocrew-state/kirocrew-sync/ $BUNDLE_DIR --profile default --exclude *.lock --exclude *.tmp" \
+    "aws s3 sync s3://kirocrew-state/kirocrew-sync/ $BUNDLE_DIR --profile default --exclude *.lock --exclude *.tmp --exclude mailbox/*" \
     "$(sed -n 2p "$AWS_STUB_CALLS")"
 
 reset_calls
@@ -209,7 +209,7 @@ assert_eq "every aws call carries --endpoint-url" \
     "0" "$(lines_missing "--endpoint-url https://abc123.r2.cloudflarestorage.com")"
 assert_absent "--region is still absent when only the endpoint is set" "$(calls)" "--region"
 assert_eq "the endpoint lands where --profile always was, not at the end" \
-    "aws s3 sync $BUNDLE_DIR s3://kirocrew-state/kirocrew-sync/ --profile default --endpoint-url https://abc123.r2.cloudflarestorage.com --delete --exclude *.lock --exclude *.tmp" \
+    "aws s3 sync $BUNDLE_DIR s3://kirocrew-state/kirocrew-sync/ --profile default --endpoint-url https://abc123.r2.cloudflarestorage.com --delete --exclude *.lock --exclude *.tmp --exclude mailbox/*" \
     "$(sed -n 2p "$AWS_STUB_CALLS")"
 
 # --- Scenario 3: S3_REGION set --------------------------------------------
@@ -242,7 +242,7 @@ assert_eq "every aws call carries both flags" \
 # Line 4 of this run: push probes (1) and uploads (2), pull probes (3) and
 # downloads (4).
 assert_eq "the pull command line is exactly the R2 one" \
-    "aws s3 sync s3://kirocrew-state/kirocrew-sync/ $BUNDLE_DIR --profile default --endpoint-url https://abc123.r2.cloudflarestorage.com --region auto --exclude *.lock --exclude *.tmp" \
+    "aws s3 sync s3://kirocrew-state/kirocrew-sync/ $BUNDLE_DIR --profile default --endpoint-url https://abc123.r2.cloudflarestorage.com --region auto --exclude *.lock --exclude *.tmp --exclude mailbox/*" \
     "$(sed -n 4p "$AWS_STUB_CALLS")"
 
 out="$(backend_status 2>&1)"
@@ -286,6 +286,40 @@ assert_eq "an unreachable bucket exits non-zero" "1" "$rc"
 assert_eq "an unreachable bucket prints nothing" "" "$out"
 export AWS_STUB_RC=0
 export AWS_STUB_LISTING=""
+
+# --- Scenario 5b: the session mailbox goes through the same flags ----------
+# send-session / inbox use backend_mailbox_*; they must reach the same store
+# (endpoint, region) as sync, under $S3_PREFIX/mailbox/, which push and pull
+# exclude above.
+export S3_ENDPOINT_URL="https://abc123.r2.cloudflarestorage.com"
+export S3_REGION="auto"
+source_backend
+MB_FILE="$WORK/x.kcsession.json.gz"
+echo data > "$MB_FILE"
+reset_calls
+backend_mailbox_put "$MB_FILE" "bob/x.kcsession.json.gz" >/dev/null
+backend_mailbox_get "bob/x.kcsession.json.gz" "$WORK/got" >/dev/null
+backend_mailbox_delete "bob/x.kcsession.json.gz" >/dev/null
+assert_eq "mailbox put uploads under mailbox/ with the store's flags" \
+    "aws s3 cp $MB_FILE s3://kirocrew-state/kirocrew-sync/mailbox/bob/x.kcsession.json.gz --profile default --endpoint-url https://abc123.r2.cloudflarestorage.com --region auto --only-show-errors" \
+    "$(sed -n 2p "$AWS_STUB_CALLS")"
+assert_eq "every mailbox call carries both flags" \
+    "0" "$(lines_missing "--profile default --endpoint-url https://abc123.r2.cloudflarestorage.com --region auto")"
+assert_contains "mailbox delete removes that one key" "$(calls)" \
+    "aws s3 rm s3://kirocrew-state/kirocrew-sync/mailbox/bob/x.kcsession.json.gz"
+
+export AWS_STUB_LISTING="2026-09-22 10:00:00       2048 20260922T100000Z-abc123--alice--notes.kcsession.json.gz
+2026-09-22 10:00:01         10 notes.txt"
+out="$(backend_mailbox_list bob)"; rc=$?
+assert_eq "mailbox list exits 0" "0" "$rc"
+assert_eq "mailbox list prints name and size of session files only" \
+    "20260922T100000Z-abc123--alice--notes.kcsession.json.gz 2048" "$out"
+export AWS_STUB_RC=1
+out="$(backend_mailbox_list bob)"; rc=$?
+assert_eq "mailbox list on an unreachable bucket exits non-zero" "1" "$rc"
+export AWS_STUB_RC=0
+export AWS_STUB_LISTING=""
+unset S3_ENDPOINT_URL S3_REGION
 
 # --- Scenario 6: the setup advice matches the store configured -------------
 # check_s3_configured exits 1 on failure; the command substitution contains

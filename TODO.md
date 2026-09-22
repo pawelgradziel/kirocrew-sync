@@ -78,10 +78,12 @@ join) and a bundle-based alternative to a second sync root are in
 **Decided 2026-09-22** — see
 [ADR 0003](docs/adr/0003-kiro-cli-session-half.md) (Proposed). `sync` will not
 carry this half: no second sync root, and `session_map.json` stays `DENY`'d.
-A resumable copy moves through a separate, explicit, personal-scope
-`send-session`/`inbox` verb that carries upstream `.kcsession.json.gz` bundles
-and installs them via `POST /api/chat/slots/import`. That verb is being
-prototyped. The ADR lists what would reopen the raw-file approach below.
+A resumable copy moves through the separate, explicit
+`send-session --include-layer-b` / `inbox --install` commands (see the README),
+which carry upstream `.kcsession.json.gz` bundles and install them via
+`POST /api/chat/slots/import`, so upstream does the envelope rewrite and the
+map join. That is not continuous sync: every send makes a new copy on the
+other side. The ADR lists what would reopen the raw-file approach below.
 
 **Why it is not a one-line fix** (kept for context; superseded by ADR 0003)
 

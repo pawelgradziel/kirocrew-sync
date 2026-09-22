@@ -63,7 +63,17 @@ Both are read from the environment first, so you can override them in
 ```
 
 Push runs with `--delete`, so the remote directory mirrors the bundle exactly.
-`.lock` and `.tmp` files are excluded in both directions.
+`.lock` and `.tmp` files are excluded in both directions, and so is
+`$RSYNC_PATH/mailbox/`, the session mailbox.
+
+## Session mailbox
+
+`send-session` and `inbox` (see the README) keep session bundles in
+`$RSYNC_PATH/mailbox/<recipient>/`. An upload goes to a hidden temporary name
+and is renamed over SSH, so a listing never shows half a file. Listing uses one
+SSH round trip and the remote's `stat -c`, so it assumes a GNU userland on the
+remote, the same as `backend_list`. The bundles hold whole transcripts; the
+permissions advice below applies to them too.
 
 ## Troubleshooting
 
