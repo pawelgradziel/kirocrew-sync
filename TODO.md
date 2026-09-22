@@ -68,6 +68,13 @@ A session has two halves on disk and only one of them is inside the sync root.
   so a machine with only the crew half has sessions whose replay log is
   missing.
 
+**Update 2026-09-22** — `session_map.json` no longer syncs (it was being
+pruned on every machine without the CLI half, and the deletion merged back).
+Upstream's session export/import now carries this half as "Layer B"; its
+constraints (byte-exact files, machine-specific envelope fields, on-loop map
+join) and a bundle-based alternative to a second sync root are in
+[docs/upstream-sync-review-2026-09-22.md](docs/upstream-sync-review-2026-09-22.md).
+
 **Why it is not a one-line fix**
 
 `ALLOW` is relative to `KIROCREW_DIR`, so there is no glob that reaches

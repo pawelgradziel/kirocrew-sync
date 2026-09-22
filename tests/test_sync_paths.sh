@@ -159,6 +159,50 @@ rm -rf "$SYNCED"
 assert_eq "SYNC_PORTABLE_PATHS=0 sends the path verbatim" \
     "$HOME_A/code/groover/docs" "$(synced_uri "$SYNCED")"
 
+# --- session_map.json stays on its machine ----------------------------------
+#
+# Its entries point at kiro-cli contexts outside the sync root, and KiroCrew
+# prunes every entry whose context file is missing. A synced copy was pruned
+# on the receiving machine and the merge carried the deletion back.
+echo '{"dashboard:chat-a": {"sid": "sid-a"}}' > "$CREW_A/session_map.json"
+echo '{"dashboard:chat-b": {"sid": "sid-b"}}' > "$CREW_B/session_map.json"
+
+rm -rf "$SYNCED"
+(
+    export HOME="$HOME_A"
+    kcsync unpack --kirocrew-dir "$CREW_A" --repo "$SYNCED"
+) > /dev/null 2>&1 || { echo "  session_map unpack step failed" >&2; exit 1; }
+
+assert_eq "session_map.json is not published" \
+    "" "$(find "$SYNCED" -name 'session_map.json' -print)"
+
+# A repo written by an older build still carries one. Packing it must neither
+# overwrite this machine's copy nor delete it.
+mkdir -p "$SYNCED/files"
+echo '{"dashboard:chat-a": {"sid": "sid-a"}}' > "$SYNCED/files/session_map.json"
+(
+    export HOME="$HOME_B"
+    kcsync pack --kirocrew-dir "$CREW_B" --repo "$SYNCED"
+) > /dev/null 2>&1 || { echo "  session_map pack step failed" >&2; exit 1; }
+
+assert_eq "an old repo's session_map.json does not overwrite the local one" \
+    "sid-b" "$(python3 -c "
+import json
+print(','.join(v['sid'] for v in json.load(open('$CREW_B/session_map.json')).values()))
+")"
+
+# The next unpack drops the stale copy from the repo.
+(
+    export HOME="$HOME_B"
+    kcsync unpack --kirocrew-dir "$CREW_B" --repo "$SYNCED"
+) > /dev/null 2>&1 || { echo "  session_map re-unpack step failed" >&2; exit 1; }
+
+assert_eq "the next unpack removes a stale session_map.json from the repo" \
+    "" "$(find "$SYNCED" -name 'session_map.json' -print)"
+
+assert_eq "and leaves the local session_map.json in place" \
+    "yes" "$(exists "$CREW_B/session_map.json")"
+
 # --- the running-KiroCrew guard does not trip over this script --------------
 #
 # The guard greps the process table for "kirocrew", which the sync script's own

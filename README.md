@@ -129,7 +129,7 @@ full design and its trade-offs.
 | --- | --- |
 | `sessions/*.jsonl`, `sessions/archive/*.jsonl` | Chat transcripts, live and archived (append-only union) |
 | `config.json`, `tags.json`, `tag_boards.json` | Settings (merged key by key) |
-| `session_map.json`, `hooks.json`, `model_windows.json` | Session and runtime metadata |
+| `hooks.json`, `model_windows.json` | Runtime metadata |
 | `workspace/memory/` | Workspace memory notes |
 | `artifacts/` | Saved widgets and artifacts |
 
@@ -142,6 +142,7 @@ full design and its trade-offs.
 - Machine-local database tables: filesystem scan state and transient job state
 - `crons.json` — a synced copy would make every machine fire the same scheduled jobs (duplicate executions, duplicate notifications)
 - `notifications.jsonl` — per-machine delivery history; a notification fired on one machine is not a fact about another
+- `session_map.json` — points each session at a kiro-cli context in `~/.kiro/sessions/cli`, which does not sync; KiroCrew prunes entries whose context is missing, and a synced copy spread that pruning back to the machine that owned them
 
 Credential-shaped fields inside synced JSON (`bot_token`, `app_password`,
 `api_key`, …) are stripped before upload and restored from your local file

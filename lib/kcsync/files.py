@@ -23,7 +23,6 @@ ALLOW = [
     "config.json",
     "tags.json",
     "tag_boards.json",
-    "session_map.json",
     "admission_policy.json",
     "model_windows.json",
     "autonudge.json",
@@ -60,7 +59,18 @@ TEAM_ALLOW = [
 ]
 
 # Always wins over ALLOW.
+#
+# session_map.json is machine-local, like upstream's own portable export treats
+# it (portability.EXPORT_EXCLUDE). Each entry points at a kiro-cli context in
+# ~/.kiro/sessions/cli, which is outside the sync root, and KiroCrew's startup
+# SessionMap.prune() deletes every entry whose <sid>.json it cannot find. So a
+# synced copy was pruned on every other machine, and the three-way merge then
+# carried that deletion back and cost the originating machine its own resume
+# mappings. Listed here rather than just dropped from ALLOW so a later ALLOW
+# glob cannot reintroduce it; pack never deletes local files, so every machine
+# keeps its own copy. See docs/upstream-sync-review-2026-09-22.md.
 DENY = [
+    "session_map.json",
     "**/.git/**", "**/.git",
     "**/*.lock", "**/*.tmp", "**/*.bak", "**/*~", "**/*.sig",
     "**/*.key", "**/*.pem", "**/*.credentials", "**/*.token",
